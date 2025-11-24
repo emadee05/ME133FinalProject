@@ -30,6 +30,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'project = project.project:main',
+            'falling_ball = project.nodes.falling_ball:main',
         ],
     },
 )
