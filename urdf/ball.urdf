@@ -1,0 +1,14 @@
+<robot name="ball">
+
+  <link name="ball_link">
+    <visual>
+      <geometry>
+        <sphere radius="0.1"/>  <!-- 2 cm -->
+      </geometry>
+      <material name="red">
+        <color rgba="1 0 0 1"/>
+      </material>
+    </visual>
+  </link>
+
+</robot>
