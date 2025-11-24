@@ -15,7 +15,7 @@ class FallingBall(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # Ball settings
-        self.start_z = 0.5  # initial height
+        self.start_z = 1.5  # initial height
         self.reset_on_ground = True
         self.dt = 0.02      # 50 Hz update
         self.v = -0.2       # falling speed m/s

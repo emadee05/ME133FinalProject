@@ -43,7 +43,7 @@ def generate_launch_description():
         executable='static_transform_publisher',
         name='ball_tf_publisher',
         arguments=[
-            '0', '0', '2',   # translation
+            '0', '0', '1.5',   # translation
             '0', '0', '0',            # rotation (roll, pitch, yaw)
             'panda_link0',                # parent frame
             'ball_link'               # child frame (root link of ball.urdf)
