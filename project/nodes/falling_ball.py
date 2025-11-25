@@ -1,7 +1,3 @@
-"""
-ROS2 node to make a ball repeatedly fall above the Panda arm and reset after hitting the ground.
-"""
-
 import rclpy
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
@@ -28,10 +24,9 @@ class FallingBall(Node):
         self.timer = self.create_timer(self.dt, self.update)
 
     def update(self):
-        # Move the ball
         self.z += self.v * self.dt
 
-        # If ball hits the ground
+        # If hit ground
         if self.z <= 0.0:
             if self.reset_on_ground:
                 # Reset position for another fall
@@ -40,12 +35,10 @@ class FallingBall(Node):
                 self.y = random.uniform(-0.2, 0.2)
                 self.get_logger().info(f'Ball reset to ({self.x:.2f}, {self.y:.2f}, {self.z:.2f})')
             else:
-                # Stop if you don’t want to reset
                 self.destroy_timer(self.timer)
                 self.get_logger().info('Ball hit the ground, stopping TF')
                 return
 
-        # Publish TF relative to Panda base
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = "panda_link0"
