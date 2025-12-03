@@ -2,7 +2,9 @@ import rclpy
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped
+
 import random
+
 
 class FallingBall(Node):
     def __init__(self):
@@ -10,41 +12,46 @@ class FallingBall(Node):
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        # Ball settings
-        self.start_z = 1.5        # initial height
-        self.reset_on_ground = True
+        # Ball physics
+        self.start_z = 1.5      # starting height
+        self.dt = 0.02          # time step (50 Hz)
+        self.g = -9.81          # gravity
+        self.vz = 0.0           # vertical velocity
 
-        self.dt = 0.02            # 50 Hz update
-        self.g = -6            # gravity (m/s^2)
-        self.vz = 0.0             # initial vertical velocity
+        # Coefficient of restitution (0 = dead, 1 = perfect bounce)
+        self.restitution = 0.7
 
-        # Randomize x/y each drop
+        # Ball position
         self.x = random.uniform(-0.2, 0.2)
         self.y = random.uniform(-0.2, 0.2)
         self.z = self.start_z
 
         self.timer = self.create_timer(self.dt, self.update)
 
+
     def update(self):
+
         # Apply gravity
         self.vz += self.g * self.dt
         self.z += self.vz * self.dt
 
-        # If hit ground
+        # Ground hit
         if self.z <= 0.0:
-            if self.reset_on_ground:
-                # Reset height & re-randomize
+            self.z = 0.0
+
+            # Reverse velocity with damping
+            self.vz = -self.vz * self.restitution
+            self.get_logger().info(f'Bounce: vz={self.vz:.2f}')
+
+            # If too slow, reset to top
+            if abs(self.vz) < 0.3:
                 self.z = self.start_z
-                self.vz = 0.0  # reset velocity!
+                self.vz = 0.0
                 self.x = random.uniform(-0.2, 0.2)
                 self.y = random.uniform(-0.2, 0.2)
                 self.get_logger().info(
-                    f'Ball reset to ({self.x:.2f}, {self.y:.2f}, {self.z:.2f})'
+                    f'Reset ball to ({self.x:.2f}, {self.y:.2f}, {self.z:.2f})'
                 )
-            else:
-                self.destroy_timer(self.timer)
-                self.get_logger().info('Ball hit the ground, stopping TF')
-                return
 
         # Publish TF
         t = TransformStamped()
@@ -54,12 +61,10 @@ class FallingBall(Node):
         t.transform.translation.x = self.x
         t.transform.translation.y = self.y
         t.transform.translation.z = self.z
-        t.transform.rotation.x = 0.0
-        t.transform.rotation.y = 0.0
-        t.transform.rotation.z = 0.0
         t.transform.rotation.w = 1.0
 
         self.tf_broadcaster.sendTransform(t)
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -67,6 +72,7 @@ def main(args=None):
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()
