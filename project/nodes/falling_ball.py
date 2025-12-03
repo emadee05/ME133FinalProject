@@ -11,12 +11,14 @@ class FallingBall(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # Ball settings
-        self.start_z = 1.5  # initial height
+        self.start_z = 1.5        # initial height
         self.reset_on_ground = True
-        self.dt = 0.02      # 50 Hz update
-        self.v = -0.2       # falling speed m/s
 
-        # Randomize x/y for each drop
+        self.dt = 0.02            # 50 Hz update
+        self.g = -6            # gravity (m/s^2)
+        self.vz = 0.0             # initial vertical velocity
+
+        # Randomize x/y each drop
         self.x = random.uniform(-0.2, 0.2)
         self.y = random.uniform(-0.2, 0.2)
         self.z = self.start_z
@@ -24,21 +26,27 @@ class FallingBall(Node):
         self.timer = self.create_timer(self.dt, self.update)
 
     def update(self):
-        self.z += self.v * self.dt
+        # Apply gravity
+        self.vz += self.g * self.dt
+        self.z += self.vz * self.dt
 
         # If hit ground
         if self.z <= 0.0:
             if self.reset_on_ground:
-                # Reset position for another fall
+                # Reset height & re-randomize
                 self.z = self.start_z
+                self.vz = 0.0  # reset velocity!
                 self.x = random.uniform(-0.2, 0.2)
                 self.y = random.uniform(-0.2, 0.2)
-                self.get_logger().info(f'Ball reset to ({self.x:.2f}, {self.y:.2f}, {self.z:.2f})')
+                self.get_logger().info(
+                    f'Ball reset to ({self.x:.2f}, {self.y:.2f}, {self.z:.2f})'
+                )
             else:
                 self.destroy_timer(self.timer)
                 self.get_logger().info('Ball hit the ground, stopping TF')
                 return
 
+        # Publish TF
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = "panda_link0"
@@ -53,14 +61,12 @@ class FallingBall(Node):
 
         self.tf_broadcaster.sendTransform(t)
 
-
 def main(args=None):
     rclpy.init(args=args)
     node = FallingBall()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()
