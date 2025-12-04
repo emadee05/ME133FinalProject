@@ -22,22 +22,24 @@ class TrajectoryNode(Node):
             'panda_joint4','panda_joint5','panda_joint6','panda_joint7'
         ]
 
-        # Kinematic chain
         self.chain = KinematicChain(self, 'panda_link0', 'panda_paddle', self.jointnames)
 
-        # Initial joint position
-        self.qc = np.radians(np.array([0, 90, 0, -90, 0, 0, 0]))
+        # slight tilt so we can see trajectory
+        self.qc = np.radians(np.array([0, 90, 0, -90, 0, -30, 0]))
         (self.p0, self.R0, _, _) = self.chain.fkin(self.qc)
         self.qcdot = np.zeros(7)
 
         # Hover Z position slightly above 0
         self.hover_z = max(self.p0[2], 0.05)
 
-        # Timer settings
+        # Oscillation
+        self.amp = 0.05  
+        self.freq = 0.5  
+        self.start_time = self.get_clock().now().nanoseconds * 1e-9  # ns to seconds
+
         self.dt = 0.01  # 100Hz
         self.now = self.get_clock().now()
 
-        # Publishers
         self.pubjoint = self.create_publisher(JointState, '/joint_states', 10)
         self.pubpose  = self.create_publisher(PoseStamped, '/pose', 10)
         self.pubtwist = self.create_publisher(TwistStamped, '/twist', 10)
@@ -55,43 +57,36 @@ class TrajectoryNode(Node):
         self.destroy_node()
 
     def update(self):
-        # Use current time
-        now = self.get_clock().now()
+        # Current time
+        t = self.get_clock().now().nanoseconds * 1e-9 - self.start_time
 
-        # Desired pose
+        # Desired pose with vertical oscillation
         pd = self.p0.copy()
-        pd[2] = max(self.p0[2], 0.05)
+        pd[2] = self.hover_z + self.amp * np.sin(2 * np.pi * self.freq * t)
         Rd = self.R0.copy()
 
-        # Forward kinematics
         _, _, Jv, Jw = self.chain.fkin(self.qc)
         J = np.vstack((Jv, Jw))
         pc, Rc, _, _ = self.chain.fkin(self.qc)
 
-        # PD control
         ep = pd - pc
         eRnow = eR(Rd, Rc)
         xdot = np.concatenate((ep / self.dt, eRnow / self.dt))
         self.qcdot = np.linalg.pinv(J) @ xdot
         self.qc = self.qc + self.qcdot * self.dt
 
-        # Header
-        header = Header(stamp=now.to_msg(), frame_id='world')
+        header = Header(stamp=self.get_clock().now().to_msg(), frame_id='world')
 
-        # Publish joint state
         self.pubjoint.publish(JointState(
             header=header,
             name=self.jointnames,
             position=self.qc.tolist(),
             velocity=self.qcdot.tolist()))
 
-        # Publish pose
         self.pubpose.publish(PoseStamped(header=header, pose=Pose_from_Rp(Rd, pd)))
 
-        # Publish zero twist
         self.pubtwist.publish(TwistStamped(header=header, twist=Twist_from_vw(vzero(), vzero())))
 
-        # Broadcast TF
         self.tfbroad.sendTransform(TransformStamped(
             header=header,
             child_frame_id='desired',
