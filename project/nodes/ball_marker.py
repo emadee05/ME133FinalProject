@@ -5,12 +5,17 @@ from std_msgs.msg import ColorRGBA
 import numpy as np
 import tf2_ros
 from tf_transformations import quaternion_from_matrix
+from geometry_msgs.msg import PointStamped, TwistStamped
+
 
 class BouncingBall(Node):
     def __init__(self):
         super().__init__("bouncing_ball_marker")
 
         self.pub = self.create_publisher(Marker, "ball_marker", 10)
+        self.pos_pub = self.create_publisher(PointStamped, "ball_position", 10)
+        self.vel_pub = self.create_publisher(TwistStamped, "ball_velocity", 10)
+
 
         # 100Hz
         self.dt = 0.01
@@ -41,6 +46,12 @@ class BouncingBall(Node):
 
         # Paddle size (hardcoded for now)
         self.paddle_size = np.array([0.15, 0.2, 0.01])  # x_width, y_width, thickness
+
+    def random_xy(self):
+        return (
+            np.random.uniform(-0.5, 0.5),    # adjust to whatever field you want
+            np.random.uniform(-0.5, 0.5)
+        )
 
     def get_paddle_transform(self):
         try:
@@ -108,6 +119,7 @@ class BouncingBall(Node):
                 if abs(self.vz) < self.min_bounce:
                     self.get_logger().info("Velocity too small on paddle, respawning ball.")
                     self.z = self.initial_height
+                    self.x, self.y = self.random_xy()
                     self.vz = 0.0
                     self.vx = 0.0
                     self.vy = 0.0
@@ -118,8 +130,7 @@ class BouncingBall(Node):
             self.vz = -self.vz * self.restitution
             if abs(self.vz) < self.min_bounce:
                 self.z = self.initial_height
-                self.x = 0.34
-                self.y = -0.1
+                self.x, self.y = self.random_xy()
                 self.vz = 0.0
                 self.vx = 0.0
                 self.vy = 0.0
@@ -142,6 +153,23 @@ class BouncingBall(Node):
         ball_marker.color = ColorRGBA(r=1.0, g=0.4, b=0.1, a=1.0)
         ball_marker.lifetime.sec = 0
         self.pub.publish(ball_marker)
+
+        pos_msg = PointStamped()
+        pos_msg.header.frame_id = self.frame
+        pos_msg.header.stamp = self.get_clock().now().to_msg()
+        pos_msg.point.x = self.x
+        pos_msg.point.y = self.y
+        pos_msg.point.z = self.z
+        self.pos_pub.publish(pos_msg)
+
+        # --- Publish ball velocity ---
+        vel_msg = TwistStamped()
+        vel_msg.header.frame_id = self.frame
+        vel_msg.header.stamp = self.get_clock().now().to_msg()
+        vel_msg.twist.linear.x = self.vx
+        vel_msg.twist.linear.y = self.vy
+        vel_msg.twist.linear.z = self.vz
+        self.vel_pub.publish(vel_msg)
 
 
 def quaternion_to_matrix(q):
