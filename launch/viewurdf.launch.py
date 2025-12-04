@@ -82,13 +82,19 @@ def generate_launch_description_internal(context, *args, **kwargs):
         arguments  = ['-d', rvizcfg],
         on_exit    = Shutdown())
     
+    trajectory = Node(
+        name='trajectory',
+        package='project',
+        executable='project', 
+        output='screen',
+    )
     # Configure a node for the GUI
-    node_gui = Node(
-        name       = 'gui', 
-        package    = 'joint_state_publisher_gui',
-        executable = 'joint_state_publisher_gui',
-        output     = 'screen',
-        on_exit    = Shutdown())
+    # node_gui = Node(
+    #     name       = 'gui', 
+    #     package    = 'joint_state_publisher_gui',
+    #     executable = 'joint_state_publisher_gui',
+    #     output     = 'screen',
+    #     on_exit    = Shutdown())
 
 
     ######################################################################
@@ -97,7 +103,8 @@ def generate_launch_description_internal(context, *args, **kwargs):
         # Start the robot_state_publisher, RVIZ, and the GUI.
         node_robot_state_publisher,
         node_rviz,
-        node_gui,
+        # node_gui,
+        trajectory,
     ]
 
 
