@@ -10,6 +10,9 @@ from geometry_msgs.msg  import PoseStamped, TwistStamped
 from geometry_msgs.msg  import TransformStamped
 from sensor_msgs.msg    import JointState
 from std_msgs.msg       import Header
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg  import PoseStamped, TwistStamped, PointStamped
+
 
 from .KinematicChain import KinematicChain
 from .TrajectoryUtils import *
@@ -26,25 +29,31 @@ class TrajectoryNode(Node):
         # INITIALIZE YOUR TRAJECTORY DATA!
 
         # Define the list of joint names MATCHING THE JOINT NAMES IN THE URDF!
-        names = ['panda_joint1','panda_joint2','panda_joint3','panda_joint4','panda_joint5','panda_joint6','panda_joint7']
+        # names = ['panda_joint1','panda_joint2','panda_joint3','panda_joint4','panda_joint5','panda_joint6','panda_joint7', 'panda_joint8']
+        names = [
+            'panda_joint1',
+            'panda_joint2',
+            'panda_joint3',
+            'panda_joint4',
+            'panda_joint5',
+            'panda_joint6',
+            'panda_joint7',
+        ]
+
         self.jointnames = names
 
         # Set up the kinematic chain object.
         self.chain = KinematicChain(self, 'panda_link0', 'panda_paddle', self.jointnames)
 
+        # Define the matching initial joint/task positions.        
+        self.q0 = np.radians(np.array([0, 90, 0, -90, 90, 0, 0]))
+        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0])
+        self.T = 15.0
 
-        # Define the matching initial joint/task positions.
-        self.q0 = np.radians(np.array([0, 90,   0,   -90, 0, 0, 0]))
-        #self.p0 = np.array([0.0, 0.55, 1.0])
-        #self.R0 = Reye()
+        # === task-space goal
         (self.p0, self.R0, _, _) = self.chain.fkin(self.q0)
-
-        # Define the other points.
-        self.pleft  = np.array([ 0.3, 0.5, 0.15])
-        self.pright = np.array([-0.3, 0.5, 0.15])
-        self.Rleft  = Rotx(-np.pi/2) @ Roty(-np.pi/2)
-        self.Rleft  = Rotz( np.pi/2) @ Rotx(-np.pi/2)
-        self.Rright = Reye()
+        self.goal_p = self.p0 + np.array([0.1, 0.0, 0.1])  
+        self.goal_R = self.R0                        
 
         # Initialize the stored joint command position and task errors.
         self.qc = self.q0.copy()
@@ -71,6 +80,33 @@ class TrajectoryNode(Node):
         while(not self.count_subscribers('/joint_states')):
             pass
 
+        self.ball_pos = None   # np.array([x, y, z])
+        self.ball_vel = None   # np.array([vx, vy, vz])
+        self.have_plan = False
+        self.initial_height = 1.0      # must match ball node
+        self.reset_eps_z = 0.02        # tolerance on height
+        self.reset_eps_v = 0.05        # tolerance on velocity
+        self.g = -9.81         # gravity
+
+        self.have_plan = False     # whether we've computed an intercept
+        self.p_start = self.p0     # start pose for spline
+        self.R_start = self.R0
+
+        # Subscribers for ball position and velocity
+        self.ball_pos_sub = self.create_subscription(
+            PointStamped,
+            '/ball_position',          # <-- change if your topic name is different
+            self.ball_pos_callback,
+            10
+        )
+
+        self.ball_vel_sub = self.create_subscription(
+            TwistStamped,
+            '/ball_velocity',          # <-- change if your topic name is different
+            self.ball_vel_callback,
+            10
+        )
+
         # Set up the timer to update at 100Hz, with (t=0) occuring in
         # the first update cycle (dt) from now.
         self.dt    = 0.01                       # 100Hz.
@@ -86,42 +122,134 @@ class TrajectoryNode(Node):
         self.timer.destroy()
         self.destroy_node()
 
+    def ball_pos_callback(self, msg: PointStamped):
+        # Assuming msg.header.frame_id == 'panda_link0'
+        self.ball_pos = np.array([
+            msg.point.x,
+            msg.point.y,
+            msg.point.z
+        ])
 
+    def ball_vel_callback(self, msg: TwistStamped):
+        # Assuming linear velocity in the same frame as ball_pos
+        self.ball_vel = np.array([
+            msg.twist.linear.x,
+            msg.twist.linear.y,
+            msg.twist.linear.z
+        ])
     def update(self):
         self.t   = self.t   + self.dt
         self.now = self.now + rclpy.time.Duration(seconds=self.dt) 
+        if self.ball_pos is not None and self.ball_vel is not None:
+            z  = self.ball_pos[2]
+            vz = self.ball_vel[2]
+
+            # Ball is back near spawn height and almost stationary -> treat as a new trial
+            if (abs(z - self.initial_height) < self.reset_eps_z
+                    and np.linalg.norm(self.ball_vel) < self.reset_eps_v):
+                if self.have_plan:
+                    self.get_logger().info("Ball respawned, clearing old plan.")
+                self.have_plan = False
+        if (not self.have_plan) and (self.ball_pos is not None) and (self.ball_vel is not None):
+            z0  = self.ball_pos[2]
+            vz0 = self.ball_vel[2]
+
+            # Use current paddle height as target hit height
+            pc_current, Rc_current, _, _ = self.chain.fkin(self.qc)
+            z_hit = pc_current[2]  # you can add ball radius here if needed
+
+            # Only plan if ball is above paddle and moving downward
+            if (z0 > z_hit) and (vz0 < 0.0):
+                a = 0.5 * self.g
+                b = vz0
+                c = z0 - z_hit
+
+                disc = b*b - 4*a*c
+                if disc > 0.0:
+                    sqrt_disc = np.sqrt(disc)
+                    t1 = (-b + sqrt_disc) / (2*a)
+                    t2 = (-b - sqrt_disc) / (2*a)
+                    t_candidates = [t for t in (t1, t2) if t > 0.0]
+
+                    if t_candidates:
+                        t_hit = min(t_candidates)
+
+                        # Plan a task-space spline from current paddle pose
+                        self.T = float(t_hit)
+                        self.t = 0.0  # reset internal time
+
+                        self.p_start, self.R_start, _, _ = self.chain.fkin(self.qc)
+
+                        x_hit = self.ball_pos[0]
+                        y_hit = self.ball_pos[1]
+                        self.goal_p = np.array([x_hit, y_hit, z_hit])
+                        self.goal_R = self.R_start  # keep current orientation
+
+                        self.have_plan = True
+                        self.get_logger().info(
+                            f"Planned intercept: T={self.T:.3f}s, goal_p={self.goal_p}"
+                        )
         # COMPUTE THE TRAJECTORY AT THIS TIME INSTANCE.
-        (s0, s0dot) = goto(self.t, 3.0, 0.0, 1.0)
+        
+        # # === q0 to goal via joint spline 
+        if self.t >= self.T:
+            # self.t = self.T
 
-        pd = self.p0 + (self.pright - self.p0) * s0
-        vd =           (self.pright - self.p0) * s0dot
+            # ===== HOLD FINAL JOINT POSITION =====
+            qc    = self.qgoal.copy()
+            qcdot = np.zeros_like(self.qgoal)
+            
 
-        Rd = Reye()
-        wd = np.zeros(3)
+        else:
+            # ===== JOINT-SPACE SPLINE q0 -> qgoal =====
+            qc, qcdot = goto(self.t, self.T, self.q0, self.qgoal)
 
-        # KINEMATICS
-        (_, _, Jv, Jw) = self.chain.fkin(self.qc)
-        J = np.vstack((Jv, Jw))
-        # get vr and wr from the vd + lamda(error concatenated) - equation in notes
-        linearv = vd + (0.1/self.dt) * self.ep
-        angularv = wd + (0.1/self.dt) * self.eR
+        self.qc = qc
+        self.qcdot = qcdot
 
-        xdot = np.concatenate((linearv, angularv))
-        self.qcdot = np.linalg.pinv(J) @ xdot
-        self.qc = self.qc + self.qcdot * self.dt
-        # run in again
-        (pc, Rc, Jv, Jw) = self.chain.fkin(self.qc)
-        self.ep = pd - pc
-        self.eR = eR(Rd, Rc)
+        pc, Rc, Jv, Jw = self.chain.fkin(self.qc)
+        vd = Jv @ qcdot
+        wd = Jw @ qcdot
+        pd = pc 
+        Rd = Rc
+        # # =======
 
-        qc = self.qc
-        qcdot = self.qcdot
-        self.L = 0.4
-        diagonal = np.diag([1/self.L, 1/self.L, 1/self.L, 1.0, 1.0, 1.0])
-        J_bar = diagonal @ J
+
+        # if self.t > self.T:
+        #     self.t = self.T 
+        # (s, sdot) = goto(self.t, self.T, 0.0, 1.0)
+        # direction = self.goal_p - self.p0
+        # pd = self.p0 + s    * direction     # desired position in task space
+        # vd =          sdot * direction      # desired linear velocity
+
+        # Rd = self.goal_R                    # keep same orientation
+        # wd = vzero()                        # no desired angular velocity
+
         
 
-        header=Header(stamp=self.now.to_msg(), frame_id='world')
+        # KINEMATICS
+        # (_, _, Jv, Jw) = self.chain.fkin(self.qc)
+        # J = np.vstack((Jv, Jw))
+        # # get vr and wr from the vd + lamda(error concatenated) - equation in notes
+        # linearv = vd + (0.1/self.dt) * self.ep
+        # angularv = wd + (0.1/self.dt) * self.eR
+
+        # xdot = np.concatenate((linearv, angularv))
+        # self.qcdot = np.linalg.pinv(J) @ xdot
+        # self.qc = self.qc + self.qcdot * self.dt
+        # # run in again
+        # (pc, Rc, Jv, Jw) = self.chain.fkin(self.qc)
+        # self.ep = pd - pc
+        # self.eR = eR(Rd, Rc)
+
+        # qc = self.qc
+        # qcdot = self.qcdot
+        # self.L = 0.4
+        # diagonal = np.diag([1/self.L, 1/self.L, 1/self.L, 1.0, 1.0, 1.0])
+        # J_bar = diagonal @ J
+        
+        # ================================================
+        header=Header(stamp=self.now.to_msg(), frame_id='panda_link0')
         self.pubjoint.publish(JointState(
             header=header,
             name=self.jointnames,
