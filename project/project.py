@@ -46,7 +46,7 @@ class TrajectoryNode(Node):
         self.chain = KinematicChain(self, 'panda_link0', 'panda_paddle', self.jointnames)
 
         # Define the matching initial joint/task positions.        
-        self.q0 = np.radians(np.array([0, 90, 0, -90, 90, 0, 0]))
+        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2]))
         self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0])
         self.T = 15.0
 
@@ -122,6 +122,44 @@ class TrajectoryNode(Node):
         self.timer.destroy()
         self.destroy_node()
 
+    def ik_to_joints(self, pd, Rd=None, qi = None, dt=0.01, c=0.5, max_iters=200, tol=1e-4):
+        '''
+        given desired position/orientation, integrate qdot = pinv(J) * xdot until we reach pose and we get q
+        returns the q and if it can reach
+        '''
+        if qi is None:
+            q = self.q0.copy()
+        else:
+            q = qi.copy()
+        for k in range(max_iters):
+            pc, Rc, Jv, Jw = self.chain.fkin(q)
+            err = pd - pc
+            if np.linalg.norm(err)<tol:
+                return q, True
+            # jac for pos, we care about the cartesian position
+            J = Jv 
+            dq = c*(np.linalg.pinv(J)@err)
+            q = q+dq
+        return q, False
+        # J = np.vstack((Jv, Jw))
+        # # get vr and wr from the vd + lamda(error concatenated) - equation in notes
+        # linearv = vd + (0.1/self.dt) * self.ep
+        # angularv = wd + (0.1/self.dt) * self.eR
+
+        # xdot = np.concatenate((linearv, angularv))
+        # self.qcdot = np.linalg.pinv(J) @ xdot
+        # self.qc = self.qc + self.qcdot * self.dt
+        # # run in again
+        # (pc, Rc, Jv, Jw) = self.chain.fkin(self.qc)
+        # self.ep = pd - pc
+        # self.eR = eR(Rd, Rc)
+
+        # qc = self.qc
+        # qcdot = self.qcdot
+        # self.L = 0.4
+        # diagonal = np.diag([1/self.L, 1/self.L, 1/self.L, 1.0, 1.0, 1.0])
+        # J_bar = diagonal @ J
+
     def ball_pos_callback(self, msg: PointStamped):
         # Assuming msg.header.frame_id == 'panda_link0'
         self.ball_pos = np.array([
@@ -183,6 +221,7 @@ class TrajectoryNode(Node):
                         x_hit = self.ball_pos[0]
                         y_hit = self.ball_pos[1]
                         self.goal_p = np.array([x_hit, y_hit, z_hit])
+                        self.qgoal, self.reach = self.ik_to_joints(self.goal_p) # also put desired orientation of tip
                         self.goal_R = self.R_start  # keep current orientation
 
                         self.have_plan = True

@@ -87,7 +87,7 @@ class BouncingBall(Node):
         paddle_pos, paddle_rot = self.get_paddle_transform()
         if paddle_pos is not None:
             #offset from joint to paddle center
-            paddle_offset = np.array([-0.13, -0.15, 0.0])
+            paddle_offset = np.array([0.0, 0.0, 0.0])
             paddle_center = paddle_pos + paddle_offset
 
             # quaternion to rotation matrix
