@@ -33,6 +33,7 @@ setup(
             'project = project.project:main',
             'testarm = project.testarm:main',
             'ball_marker = project.nodes.ball_marker:main',
+            'goal_marker = project.nodes.goal_marker:main',
             'falling_ball = project.nodes.falling_ball:main',
         ],
     },
