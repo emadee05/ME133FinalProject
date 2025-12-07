@@ -6,6 +6,8 @@ import numpy as np
 import tf2_ros
 from tf_transformations import quaternion_from_matrix
 from geometry_msgs.msg import PointStamped, TwistStamped
+from std_msgs.msg import Bool
+
 
 
 class BouncingBall(Node):
@@ -22,6 +24,14 @@ class BouncingBall(Node):
             self.launch_callback,
             10
         )
+
+        self.respawn_sub = self.create_subscription(
+            Bool,
+            "ball_respawn",
+            self.respawn_callback,
+            10
+        )
+
         # 100Hz
         self.dt = 0.01
         self.timer = self.create_timer(self.dt, self.update)
@@ -66,6 +76,16 @@ class BouncingBall(Node):
             np.random.uniform(-0.5, 0.5),    # adjust to whatever field you want
             np.random.uniform(-0.5, 0.5)
         )
+
+    def respawn_callback(self, msg):
+        if msg.data:
+            self.get_logger().info("Received respawn signal from goal node.")
+            self.z = self.initial_height
+            self.x, self.y = self.random_xy()
+            self.vz = 0.0
+            self.vx = 0.0
+            self.vy = 0.0
+            self.desired_launch_vel = None
 
     def get_paddle_transform(self):
         try:

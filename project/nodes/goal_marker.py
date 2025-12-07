@@ -3,6 +3,7 @@ from rclpy.node import Node
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import PointStamped
+from std_msgs.msg import Bool
 
 from std_msgs.msg import ColorRGBA
 import numpy as np
@@ -14,6 +15,8 @@ class GoalMarker(Node):
 
         self.marker_pub = self.create_publisher(Marker, "goal_marker", 10)
         self.goal_pub = self.create_publisher(Point, "goal_position", 10)
+        self.respawn_pub = self.create_publisher(Bool, "ball_respawn", 10)
+
 
         self.ball_sub = self.create_subscription(
             PointStamped,
@@ -66,6 +69,7 @@ class GoalMarker(Node):
             self.get_logger().info(
                 f"Ball reached goal! dist={dist:.3f}. Respawning goal."
             )
+            self.respawn_pub.publish(Bool(data=True))
             self.respawn_goal()
 
     def publish_goal(self):
