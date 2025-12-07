@@ -15,14 +15,20 @@ class BouncingBall(Node):
         self.pub = self.create_publisher(Marker, "ball_marker", 10)
         self.pos_pub = self.create_publisher(PointStamped, "ball_position", 10)
         self.vel_pub = self.create_publisher(TwistStamped, "ball_velocity", 10)
-
-
+        self.desired_launch_vel = None
+        self.launch_sub = self.create_subscription(
+            TwistStamped,
+            "ball_launch_vel",
+            self.launch_callback,
+            10
+        )
         # 100Hz
         self.dt = 0.01
         self.timer = self.create_timer(self.dt, self.update)
 
         # Physics parameters
-        self.g = -5           # gravity
+        self.desired_launch_vel = None #nparray
+        self.g = -9.8          # gravity
         self.radius = 0.03
         self.vz = 0.0
         self.z = 1.0             # initial height
@@ -46,6 +52,14 @@ class BouncingBall(Node):
 
         # Paddle size (hardcoded for now)
         self.paddle_size = np.array([0.15, 0.2, 0.01])  # x_width, y_width, thickness
+
+
+    def launch_callback(self, msg: TwistStamped):
+        self.desired_launch_vel = np.array([
+            msg.twist.linear.x,
+            msg.twist.linear.y,
+            msg.twist.linear.z
+        ], dtype=float)
 
     def random_xy(self):
         return (
@@ -78,6 +92,13 @@ class BouncingBall(Node):
                 tf2_ros.ExtrapolationException):
             return None, None
 
+    def launch_callback(self, msg: TwistStamped):
+        self.desired_launch_vel = np.array([
+            msg.twist.linear.x,
+            msg.twist.linear.y,
+            msg.twist.linear.z
+        ], dtype=float)
+        
     def update(self):
         self.vz += self.g * self.dt
         self.z += self.vz * self.dt
@@ -107,22 +128,32 @@ class BouncingBall(Node):
                 new_world_pos = R @ rel_pos_local + paddle_center
                 self.x, self.y, self.z = new_world_pos
 
-                self.vz = -self.vz * self.restitution
+                if self.desired_launch_vel is not None:
+                    self.vx = float(self.desired_launch_vel[0])
+                    self.vy = float(self.desired_launch_vel[1])
+                    self.vz = float(self.desired_launch_vel[2])
 
-                # Apply X/Y velocity proportional to tilt
-                self.vx += 0.3 * R[0, 2]  # world X component of paddle normal
-                self.vy += 0.3 * R[1, 2]  # world Y component of paddle normal
+                    self.get_logger().info("CONTACT")
+                    self.desired_launch_vel = None
 
-                self.get_logger().info(f"CONTACT! Ball hit paddle at z={self.z:.3f}")
+                else:
+                    self.vz = -self.vz * self.restitution
 
-                # Respawn if velocity too small
-                if abs(self.vz) < self.min_bounce:
-                    self.get_logger().info("Velocity too small on paddle, respawning ball.")
-                    self.z = self.initial_height
-                    self.x, self.y = self.random_xy()
-                    self.vz = 0.0
-                    self.vx = 0.0
-                    self.vy = 0.0
+                    # Apply X/Y velocity proportional to tilt
+                    self.vx += 0.3 * R[0, 2]  # world X component of paddle normal
+                    self.vy += 0.3 * R[1, 2]  # world Y component of paddle normal
+
+                    self.get_logger().info(f"CONTACT! Ball hit paddle at z={self.z:.3f}")
+
+                    # Respawn if velocity too small
+                    if abs(self.vz) < self.min_bounce:
+                        self.get_logger().info("Velocity too small on paddle, respawning ball.")
+                        self.z = self.initial_height
+                        self.x, self.y = self.random_xy()
+                        self.vz = 0.0
+                        self.vx = 0.0
+                        self.vy = 0.0
+                        self.desired_launch_vel = None
 
         # --- Floor collision ---
         if self.z - self.radius <= self.floor:

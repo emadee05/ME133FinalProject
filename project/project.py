@@ -6,8 +6,7 @@ from math               import pi, sin, cos, acos, atan2, sqrt, fmod, exp
 
 from asyncio            import Future
 from rclpy.node         import Node
-from geometry_msgs.msg  import PoseStamped, TwistStamped
-from geometry_msgs.msg  import TransformStamped
+from geometry_msgs.msg  import PoseStamped, TwistStamped, Point, TransformStamped
 from sensor_msgs.msg    import JointState
 from std_msgs.msg       import Header
 from visualization_msgs.msg import Marker
@@ -48,7 +47,7 @@ class TrajectoryNode(Node):
         # Define the matching initial joint/task positions.        
         self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2]))
         self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0])
-        self.T = 15.0
+        self.T = 3.0
 
         # === task-space goal
         (self.p0, self.R0, _, _) = self.chain.fkin(self.q0)
@@ -82,6 +81,7 @@ class TrajectoryNode(Node):
 
         self.ball_pos = None   # np.array([x, y, z])
         self.ball_vel = None   # np.array([vx, vy, vz])
+        self.goal_pos = None # np.array([x,y,z])
         self.have_plan = False
         self.initial_height = 1.0      # must match ball node
         self.reset_eps_z = 0.02        # tolerance on height
@@ -95,15 +95,28 @@ class TrajectoryNode(Node):
         # Subscribers for ball position and velocity
         self.ball_pos_sub = self.create_subscription(
             PointStamped,
-            '/ball_position',          # <-- change if your topic name is different
+            '/ball_position',     
             self.ball_pos_callback,
             10
         )
 
         self.ball_vel_sub = self.create_subscription(
             TwistStamped,
-            '/ball_velocity',          # <-- change if your topic name is different
+            '/ball_velocity',        
             self.ball_vel_callback,
+            10
+        )
+
+        self.goal_pos_sub = self.create_subscription(
+            Point,
+            '/goal_position', 
+            self.goal_pos_callback,
+            10
+        )
+
+        self.ball_launch_pub = self.create_publisher(
+            TwistStamped,
+            '/ball_launch_vel',
             10
         )
 
@@ -175,6 +188,20 @@ class TrajectoryNode(Node):
             msg.twist.linear.y,
             msg.twist.linear.z
         ])
+    def goal_pos_callback(self, msg: Point):
+        self.goal_pos = np.array([
+            msg.x,
+            msg.y,
+            msg.z
+        ])
+
+    def compute_launch_v_goal(self, p_launch, p_goal, T_flight):
+        if T_flight<=0:
+            raise ValueError("T_flight must be pos")
+        g_vec = np.array([0.0, 0.0, self.g])
+        return (p_goal - p_launch - 0.5*g_vec*(T_flight**2))/T_flight
+
+
     def update(self):
         self.t   = self.t   + self.dt
         self.now = self.now + rclpy.time.Duration(seconds=self.dt) 
@@ -224,6 +251,34 @@ class TrajectoryNode(Node):
                         self.qgoal, self.reach = self.ik_to_joints(self.goal_p) # also put desired orientation of tip
                         self.goal_R = self.R_start  # keep current orientation
 
+                        if self.goal_pos is not None:
+                            T_flight = 1
+
+                            v_launch = self.compute_launch_v_goal(
+                                self.goal_p, self.goal_pos, T_flight
+                            )
+                            print("\n=== COMPUTED LAUNCH VELOCITY ===")
+                            print("goal_p:", self.goal_p)
+                            print("goal_pos:", self.goal_pos)
+                            print("v_launch:", v_launch)
+                            print("speed:", np.linalg.  norm(v_launch))
+                            print("================================\n")
+
+                            cmd = TwistStamped()
+                            cmd.header.stamp = self.now.to_msg()
+                            cmd.header.frame_id = 'panda_link0'   # same frame as ball
+
+                            cmd.twist.linear.x = float(v_launch[0])
+                            cmd.twist.linear.y = float(v_launch[1])
+                            cmd.twist.linear.z = float(v_launch[2])
+
+                            self.ball_launch_pub.publish(cmd)
+
+                            speed = np.linalg.norm(v_launch)
+                            self.get_logger().info(
+                                f"Launch vel command: {v_launch}, speed={speed:.3f}"
+                            )
+
                         self.have_plan = True
                         self.get_logger().info(
                             f"Planned intercept: T={self.T:.3f}s, goal_p={self.goal_p}"
@@ -238,7 +293,7 @@ class TrajectoryNode(Node):
             qc    = self.qgoal.copy()
             qcdot = np.zeros_like(self.qgoal)
             
-
+        
         else:
             # ===== JOINT-SPACE SPLINE q0 -> qgoal =====
             qc, qcdot = goto(self.t, self.T, self.q0, self.qgoal)
