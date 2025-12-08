@@ -72,10 +72,12 @@ class BouncingBall(Node):
         ], dtype=float)
 
     def random_xy(self):
-        return (
-            np.random.uniform(-0.5, 0.5),    # adjust to whatever field you want
-            np.random.uniform(-0.5, 0.5)
-        )
+        radius = 0.4
+        theta = np.random.uniform(0, 2*np.pi)
+        x = radius * np.cos(theta)
+        y = radius * np.sin(theta)
+        return x, y
+
 
     def respawn_callback(self, msg):
         if msg.data:
@@ -144,36 +146,45 @@ class BouncingBall(Node):
             touching_z = rel_pos_local[2] - self.radius <= half_size[2]
 
             if in_xy and touching_z:
+                # --- Correct ball position so it sits exactly on paddle surface ---
                 rel_pos_local[2] = half_size[2] + self.radius
                 new_world_pos = R @ rel_pos_local + paddle_center
                 self.x, self.y, self.z = new_world_pos
 
-                if self.desired_launch_vel is not None:
-                    self.vx = float(self.desired_launch_vel[0])
-                    self.vy = float(self.desired_launch_vel[1])
-                    self.vz = float(self.desired_launch_vel[2])
+                # --- Infinite-mass elastic collision physics ---
 
-                    self.get_logger().info("CONTACT")
-                    self.desired_launch_vel = None
+                # Paddle normal in world frame (paddle's +Z axis)
+                n = R[:, 2]
+                n = n / np.linalg.norm(n)
 
-                else:
-                    self.vz = -self.vz * self.restitution
+                # Ball velocity vector
+                v = np.array([self.vx, self.vy, self.vz])
 
-                    # Apply X/Y velocity proportional to tilt
-                    self.vx += 0.3 * R[0, 2]  # world X component of paddle normal
-                    self.vy += 0.3 * R[1, 2]  # world Y component of paddle normal
+                # Decompose velocity into normal/tangential components
+                v_n = np.dot(v, n) * n     # normal component
+                v_t = v - v_n              # tangential component
 
-                    self.get_logger().info(f"CONTACT! Ball hit paddle at z={self.z:.3f}")
+                # Reflect normal component using restitution
+                v_n_after = -self.restitution * v_n
 
-                    # Respawn if velocity too small
-                    if abs(self.vz) < self.min_bounce:
-                        self.get_logger().info("Velocity too small on paddle, respawning ball.")
-                        self.z = self.initial_height
-                        self.x, self.y = self.random_xy()
-                        self.vz = 0.0
-                        self.vx = 0.0
-                        self.vy = 0.0
-                        self.desired_launch_vel = None
+                # Final post-collision velocity
+                v_after = v_t + v_n_after
+
+                self.vx = float(v_after[0])
+                self.vy = float(v_after[1])
+                self.vz = float(v_after[2])
+
+                self.get_logger().info(
+                    f"CONTACT PHYSICS: new v = ({self.vx:.2f}, {self.vy:.2f}, {self.vz:.2f})"
+                )
+
+                # Respawn if bounce becomes too small
+                if abs(self.vz) < self.min_bounce and np.linalg.norm(v_after) < 0.2:
+                    self.get_logger().info("Bounce too small -> respawn")
+                    self.z = self.initial_height
+                    self.x, self.y = self.random_xy()
+                    self.vx = self.vy = self.vz = 0.0
+
 
         # --- Floor collision ---
         if self.z - self.radius <= self.floor:

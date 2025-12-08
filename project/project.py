@@ -15,7 +15,7 @@ from geometry_msgs.msg  import PoseStamped, TwistStamped, PointStamped
 
 from .KinematicChain import KinematicChain
 from .TrajectoryUtils import *
-from. TransformHelpers import *
+from .TransformHelpers import *
 
 class TrajectoryNode(Node):
     # Initialization.
@@ -52,7 +52,8 @@ class TrajectoryNode(Node):
         # === task-space goal
         (self.p0, self.R0, _, _) = self.chain.fkin(self.q0)
         self.goal_p = self.p0 + np.array([0.1, 0.0, 0.1])  
-        self.goal_R = self.R0                        
+        self.goal_R = self.R0       
+        self.qdot_goal = np.zeros_like(self.q0)                 
 
         # Initialize the stored joint command position and task errors.
         self.qc = self.q0.copy()
@@ -87,7 +88,7 @@ class TrajectoryNode(Node):
         self.reset_eps_z = 0.02        # tolerance on height
         self.reset_eps_v = 0.05        # tolerance on velocity
         self.g = -9.81         # gravity
-
+        self.v_paddle = None
         self.have_plan = False     # whether we've computed an intercept
         self.p_start = self.p0     # start pose for spline
         self.R_start = self.R0
@@ -135,7 +136,7 @@ class TrajectoryNode(Node):
         self.timer.destroy()
         self.destroy_node()
 
-    def ik_to_joints(self, pd, Rd=None, qi = None, dt=0.01, c=0.5, max_iters=200, tol=1e-4):
+    def ik_to_joints(self, pd, Rd, qi = None, dt=0.01, c=0.5, max_iters=200, tol=1e-4):
         '''
         given desired position/orientation, integrate qdot = pinv(J) * xdot until we reach pose and we get q
         returns the q and if it can reach
@@ -146,13 +147,20 @@ class TrajectoryNode(Node):
             q = qi.copy()
         for k in range(max_iters):
             pc, Rc, Jv, Jw = self.chain.fkin(q)
-            err = pd - pc
-            if np.linalg.norm(err)<tol:
+            pos_err = pd - pc
+            R_err_world = eR(Rd, Rc)
+            paddle_err = Rc.T @ R_err_world
+            paddle_err[2] = 0.0
+
+            rot_err = Rc @ paddle_err
+            
+            err = np.hstack((pos_err, rot_err))
+            J = np.vstack((Jv, Jw))
+            if np.linalg.norm(pos_err) < tol and np.linalg.norm(rot_err) < tol:
                 return q, True
             # jac for pos, we care about the cartesian position
-            J = Jv 
             dq = c*(np.linalg.pinv(J)@err)
-            q = q+dq
+            q = q + dq
         return q, False
         # J = np.vstack((Jv, Jw))
         # # get vr and wr from the vd + lamda(error concatenated) - equation in notes
@@ -172,6 +180,23 @@ class TrajectoryNode(Node):
         # self.L = 0.4
         # diagonal = np.diag([1/self.L, 1/self.L, 1/self.L, 1.0, 1.0, 1.0])
         # J_bar = diagonal @ J
+
+    def R_from_normal(self, n_world: np.ndarray):
+        n = np.asarray(n_world, dtype=float)
+        norm_n = np.linalg.norm(n)
+        if norm_n < 1e-8:
+            raise ValueError("n_world must be non-zero")
+        n = n / norm_n
+
+        a = np.array([1.0, 0.0, 0.0])
+        if abs(np.dot(a, n)) > 0.9:
+            a = np.array([0.0, 1.0, 0.0])
+        x = np.cross(a, n)
+        x = x / np.linalg.norm(x)
+        y = np.cross(n, x) 
+        R = np.column_stack((x, y, n))
+        return R
+
 
     def ball_pos_callback(self, msg: PointStamped):
         # Assuming msg.header.frame_id == 'panda_link0'
@@ -248,15 +273,20 @@ class TrajectoryNode(Node):
                         x_hit = self.ball_pos[0]
                         y_hit = self.ball_pos[1]
                         self.goal_p = np.array([x_hit, y_hit, z_hit])
-                        self.qgoal, self.reach = self.ik_to_joints(self.goal_p) # also put desired orientation of tip
-                        self.goal_R = self.R_start  # keep current orientation
 
                         if self.goal_pos is not None:
                             T_flight = 1
-
                             v_launch = self.compute_launch_v_goal(
                                 self.goal_p, self.goal_pos, T_flight
                             )
+                            self.v_paddle = v_launch - self.ball_vel 
+
+                            # HOW TO BUILD THE GOAL ROTATION using v_paddle
+                            self.goal_R = self.R_from_normal(self.v_paddle)# TODOOOO
+                            self.qgoal, self.reach = self.ik_to_joints(self.goal_p, self.goal_R) # also put desired orientation of tip
+
+                            pc_goal, Rc_goal, Jv_goal, Jw_goal = self.chain.fkin(self.qgoal)
+                            self.qdot_goal = np.linalg.pinv(Jv_goal) @ self.v_paddle
                             print("\n=== COMPUTED LAUNCH VELOCITY ===")
                             print("goal_p:", self.goal_p)
                             print("goal_pos:", self.goal_pos)
@@ -264,13 +294,14 @@ class TrajectoryNode(Node):
                             print("speed:", np.linalg.  norm(v_launch))
                             print("================================\n")
 
+                            # ----- PASSING OVER THE NEW BALL LAUNCH VELOCITY -----
                             cmd = TwistStamped()
                             cmd.header.stamp = self.now.to_msg()
                             cmd.header.frame_id = 'panda_link0'   # same frame as ball
 
-                            cmd.twist.linear.x = float(v_launch[0])
-                            cmd.twist.linear.y = float(v_launch[1])
-                            cmd.twist.linear.z = float(v_launch[2])
+                            cmd.twist.linear.x = float(self.v_paddle[0])
+                            cmd.twist.linear.y = float(self.v_paddle[1])
+                            cmd.twist.linear.z = float(self.v_paddle[2])
 
                             self.ball_launch_pub.publish(cmd)
 
@@ -278,7 +309,7 @@ class TrajectoryNode(Node):
                             self.get_logger().info(
                                 f"Launch vel command: {v_launch}, speed={speed:.3f}"
                             )
-
+                            # ----------------------
                         self.have_plan = True
                         self.get_logger().info(
                             f"Planned intercept: T={self.T:.3f}s, goal_p={self.goal_p}"
@@ -296,7 +327,10 @@ class TrajectoryNode(Node):
         
         else:
             # ===== JOINT-SPACE SPLINE q0 -> qgoal =====
-            qc, qcdot = goto(self.t, self.T, self.q0, self.qgoal)
+            q0dot = np.zeros_like(self.q0)
+            qc, qcdot = spline(self.t, self.T, self.q0, self.qgoal, q0dot, self.qdot_goal)
+
+
 
         self.qc = qc
         self.qcdot = qcdot
