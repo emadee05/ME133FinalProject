@@ -44,7 +44,7 @@ class GoalMarker(Node):
         angle = np.random.uniform(0, 2 * np.pi)
         self.goal_x = self.spawn_radius * np.cos(angle)
         self.goal_y = self.spawn_radius * np.sin(angle)
-        self.goal_z = 0.2
+        self.goal_z = 0.1
 
         self.get_logger().info(
             f"New goal at x={self.goal_x:.3f}, y={self.goal_y:.3f}, z={self.goal_z:.3f}"

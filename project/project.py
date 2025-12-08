@@ -73,6 +73,8 @@ class TrajectoryNode(Node):
         self.pubpose  = self.create_publisher(PoseStamped, '/pose', 10)
         self.pubtwist = self.create_publisher(TwistStamped, '/twist', 10)
         self.tfbroad  = tf2_ros.TransformBroadcaster(self)
+        self.paddle_pose_pub = self.create_publisher(PoseStamped, '/paddle_pose', 10)
+
 
         # Wait for a connection to happen.  This isn't necessary, but
         # means we don't start until the rest of the system is ready.
@@ -340,6 +342,14 @@ class TrajectoryNode(Node):
         wd = Jw @ qcdot
         pd = pc 
         Rd = Rc
+
+        paddle_msg = PoseStamped()
+        paddle_msg.header = Header(
+            stamp=self.now.to_msg(),
+            frame_id='panda_link0'   # or 'world' if you prefer world-frame physics
+        )
+        paddle_msg.pose = Pose_from_Rp(Rc, pc)
+        self.paddle_pose_pub.publish(paddle_msg)
         # # =======
 
 

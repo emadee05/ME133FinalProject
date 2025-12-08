@@ -5,7 +5,7 @@ from std_msgs.msg import ColorRGBA
 import numpy as np
 import tf2_ros
 from tf_transformations import quaternion_from_matrix
-from geometry_msgs.msg import PointStamped, TwistStamped
+from geometry_msgs.msg import PointStamped, TwistStamped, PoseStamped
 from std_msgs.msg import Bool
 
 
@@ -31,6 +31,16 @@ class BouncingBall(Node):
             self.respawn_callback,
             10
         )
+
+        self.paddle_pose_sub = self.create_subscription(
+            PoseStamped,
+            '/paddle_pose',
+            self.paddle_pose_callback,
+            10
+        )
+
+        self.paddle_pos = None
+        self.paddle_rot = None
 
         # 100Hz
         self.dt = 0.01
@@ -89,30 +99,20 @@ class BouncingBall(Node):
             self.vy = 0.0
             self.desired_launch_vel = None
 
-    def get_paddle_transform(self):
-        try:
-            trans = self.tf_buffer.lookup_transform(
-                'panda_link0',   # target frame
-                self.paddle_frame,
-                rclpy.time.Time(),  # latest
-                timeout=rclpy.duration.Duration(seconds=0.1)
-            )
-            pos = np.array([
-                trans.transform.translation.x,
-                trans.transform.translation.y,
-                trans.transform.translation.z
-            ])
-            rot = np.array([
-                trans.transform.rotation.x,
-                trans.transform.rotation.y,
-                trans.transform.rotation.z,
-                trans.transform.rotation.w
-            ])
-            return pos, rot
-        except (tf2_ros.LookupException,
-                tf2_ros.ConnectivityException,
-                tf2_ros.ExtrapolationException):
-            return None, None
+    def paddle_pose_callback(self, msg: PoseStamped):
+        self.paddle_pos = np.array([
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z
+        ], dtype=float)
+
+        self.paddle_rot = np.array([
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z,
+            msg.pose.orientation.w
+        ], dtype=float)
+
 
     def launch_callback(self, msg: TwistStamped):
         self.desired_launch_vel = np.array([
@@ -127,29 +127,39 @@ class BouncingBall(Node):
         self.x += self.vx * self.dt
         self.y += self.vy * self.dt
 
-        paddle_pos, paddle_rot = self.get_paddle_transform()
-        if paddle_pos is not None:
+        paddle_pos = self.paddle_pos
+        paddle_rot = self.paddle_rot
+        if self.paddle_pos is not None:
+            print("paddle_pos:", self.paddle_pos)
+        if paddle_pos is not None and paddle_rot is not None:
             #offset from joint to paddle center
-            paddle_offset = np.array([0.0, 0.0, 0.0])
-            paddle_center = paddle_pos + paddle_offset
+            q = np.array(paddle_rot, dtype=float)
+            q = q / np.linalg.norm(q)  # normalize
+            R = quaternion_to_matrix(q)[:3, :3]
 
-            # quaternion to rotation matrix
-            qx, qy, qz, qw = paddle_rot
-            R = quaternion_to_matrix([qx, qy, qz, qw])[:3, :3]
+            # Ball position in panda_link0
+            ball_pos = np.array([self.x, self.y, self.z])
 
-            # Collision detection in paddle frame
-            rel_pos = np.array([self.x, self.y, self.z]) - paddle_center
-            rel_pos_local = R.T @ rel_pos  # transform to paddle local frame
+            # Relative position in world frame
+            rel_pos = ball_pos - paddle_pos    
+
+            # Transform into paddle local frame
+            rel_pos_local = R.T @ rel_pos
 
             half_size = self.paddle_size / 2
-            in_xy = (-half_size[0] <= rel_pos_local[0] <= half_size[0]) and (-half_size[1] <= rel_pos_local[1] <= half_size[1])
-            touching_z = rel_pos_local[2] - self.radius <= half_size[2]
+
+            in_xy = (
+                -half_size[0] <= rel_pos_local[0] <= half_size[0] and
+                -half_size[1] <= rel_pos_local[1] <= half_size[1]
+            )
+
+            touching_z = (rel_pos_local[2] - self.radius) <= half_size[2]
 
             if in_xy and touching_z:
                 # --- Correct ball position so it sits exactly on paddle surface ---
-                rel_pos_local[2] = half_size[2] + self.radius
-                new_world_pos = R @ rel_pos_local + paddle_center
-                self.x, self.y, self.z = new_world_pos
+                # rel_pos_local[2] = half_size[2] + self.radius
+                # new_world_pos = R @ rel_pos_local + paddle_center
+                # self.x, self.y, self.z = new_world_pos
 
                 # --- Infinite-mass elastic collision physics ---
 
@@ -232,19 +242,22 @@ class BouncingBall(Node):
         vel_msg.twist.linear.y = self.vy
         vel_msg.twist.linear.z = self.vz
         self.vel_pub.publish(vel_msg)
-
-
 def quaternion_to_matrix(q):
-    """Convert quaternion [x,y,z,w] to 4x4 homogeneous rotation matrix"""
+    """Convert quaternion [x, y, z, w] to a 3×3 rotation matrix."""
     x, y, z, w = q
-    mat = np.array([
-        [1-2*y**2-2*z**2, 2*x*y-2*z*w,     2*x*z+2*y*w,     0],
-        [2*x*y+2*z*w,     1-2*x**2-2*z**2, 2*y*z-2*x*w,     0],
-        [2*x*z-2*y*w,     2*y*z+2*x*w,     1-2*x**2-2*y**2, 0],
-        [0, 0, 0, 1]
-    ])
-    return mat
+    # Normalize to avoid drift
+    n = x*x + y*y + z*z + w*w
+    if n < 1e-8:
+        return np.eye(3)
+    q = np.array([x, y, z, w], dtype=float) / np.sqrt(n)
+    x, y, z, w = q
 
+    R = np.array([
+        [1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w)],
+        [    2*(x*y + z*w),  1 - 2*(x*x + z*z),    2*(y*z - x*w)],
+        [    2*(x*z - y*w),     2*(y*z + x*w),  1 - 2*(x*x + y*y)]
+    ])
+    return R
 
 def main(args=None):
     rclpy.init(args=args)

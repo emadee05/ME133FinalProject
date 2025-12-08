@@ -35,7 +35,7 @@ setup(
             'ball_marker = project.nodes.ball_marker:main',
             'goal_marker = project.nodes.goal_marker:main',
             'falling_ball = project.nodes.falling_ball:main',
-            'goal_marker = project.nodes.goal_marker:main',
+            'combined_node = project.combinednode:main',
         ],
     },
 )
