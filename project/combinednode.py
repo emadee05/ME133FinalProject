@@ -71,16 +71,18 @@ class CombinedNode(Node):
             'panda_joint5',
             'panda_joint6',
             'panda_joint7',
+            'panda_sliderx',
+            'panda_slidery'
         ]
 
         self.jointnames = names
 
         # Set up the kinematic chain object.
-        self.chain = KinematicChain(self, 'panda_link0', 'panda_paddle', self.jointnames)
+        self.chain = KinematicChain(self, 'panda_link0', 'slidery_link', self.jointnames)
 
         # Define the matching initial joint/task positions.        
-        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2]))
-        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0])
+        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2, 0.0, 0.0]))
+        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0, 0.0, 0.0])
         self.T = 3.0
 
         # === task-space goal
@@ -96,6 +98,11 @@ class CombinedNode(Node):
 
         # Pick the convergence bandwidth.
         self.lam = 20
+        self.idx_sliderx = self.jointnames.index('panda_sliderx')
+        self.idx_slidery = self.jointnames.index('panda_slidery')
+        self.sliderx_min, self.sliderx_max = -0.13, 0.13
+        self.slidery_min, self.slidery_max = -0.15, 0.15
+
         self.pub = self.create_publisher(Marker, "ball_marker", 10)
         self.pos_pub = self.create_publisher(PointStamped, "ball_position", 10)
         self.vel_pub = self.create_publisher(TwistStamped, "ball_velocity", 10)
@@ -165,10 +172,13 @@ class CombinedNode(Node):
             self.ball_vz = 0.0
             self.ball_vx = 0.0
             self.ball_vy = 0.0
+
+    def clamp_sliders(self, q):
+        q = q.copy()
+        q[self.idx_sliderx] = np.clip(q[self.idx_sliderx], self.sliderx_min, self.sliderx_max)
+        q[self.idx_slidery] = np.clip(q[self.idx_slidery], self.slidery_min, self.slidery_max)
+        return q
             
-
-
-
     def ik_to_joints(self, pd, Rd, qi = None, dt=0.01, c=0.5, max_iters=200, tol=1e-4):
         '''
         given desired position/orientation, integrate qdot = pinv(J) * xdot until we reach pose and we get q
@@ -192,8 +202,11 @@ class CombinedNode(Node):
             if np.linalg.norm(pos_err) < tol and np.linalg.norm(rot_err) < tol:
                 return q, True
             # jac for pos, we care about the cartesian position
+            J[:, self.idx_sliderx] = 0.0
+            J[:, self.idx_slidery] = 0.0
             dq = c*(np.linalg.pinv(J)@err)
-            q = q + dq
+            q = q+dq
+            q = self.clamp_sliders(q) 
         return q, False
 
 
@@ -304,6 +317,8 @@ class CombinedNode(Node):
 
                             self.qgoal, self.reach = self.ik_to_joints(self.goal_p, self.goal_R) # also put desired orientation of tip
 
+                            self.qgoal = self.clamp_sliders(self.qgoal)
+
                             pc_goal, Rc_goal, Jv_goal, Jw_goal = self.chain.fkin(self.qgoal)
                             self.qdot_goal = np.linalg.pinv(Jv_goal) @ self.v_paddle
                             print("\n=== COMPUTED LAUNCH VELOCITY ===")
@@ -338,8 +353,7 @@ class CombinedNode(Node):
             # ===== JOINT-SPACE SPLINE q0 -> qgoal =====
             q0dot = np.zeros_like(self.q0)
             qc, qcdot = spline(self.t, self.T, self.q0, self.qgoal, q0dot, self.qdot_goal)
-
-
+            qc = self.clamp_sliders(qc)
 
         self.qc = qc
         self.qcdot = qcdot

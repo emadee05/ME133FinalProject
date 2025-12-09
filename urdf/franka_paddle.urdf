@@ -325,4 +325,32 @@
     <parent link="panda_link8"/>
     <child link="panda_paddle"/>
   </joint>
+  <link name="sliderx_link">
+    <visual>
+      <geometry>
+        <box size="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="panda_sliderx" type="prismatic">
+    <parent link="panda_paddle"/>
+    <child  link="sliderx_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>       <!-- or whatever direction -->
+    <limit lower="-0.075" upper="0.075" effort="100" velocity="0.5"/>
+  </joint>
+  <link name="slidery_link">
+    <visual>
+      <geometry>
+        <box size="0.001 0.001 0.001"/>
+      </geometry>
+    </visual>
+  </link>
+  <joint name="panda_slidery" type="prismatic">
+    <parent link="sliderx_link"/>
+    <child  link="slidery_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>       <!-- or whatever direction -->
+    <limit lower="-0.1" upper="0.1" effort="100" velocity="0.5"/>
+  </joint>
 </robot>
