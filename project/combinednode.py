@@ -71,18 +71,16 @@ class CombinedNode(Node):
             'panda_joint5',
             'panda_joint6',
             'panda_joint7',
-            'panda_sliderx',
-            'panda_slidery'
         ]
 
         self.jointnames = names
 
         # Set up the kinematic chain object.
-        self.chain = KinematicChain(self, 'panda_link0', 'slidery_link', self.jointnames)
+        self.chain = KinematicChain(self, 'panda_link0', 'panda_paddle', self.jointnames)
 
         # Define the matching initial joint/task positions.        
-        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2, 0.0, 0.0]))
-        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0, 0.0, 0.0])
+        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2]))
+        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0])
         self.T = 3.0
 
         # === task-space goal
@@ -98,12 +96,6 @@ class CombinedNode(Node):
 
         # Pick the convergence bandwidth.
         self.lam = 20
-        self.idx_sliderx = self.jointnames.index('panda_sliderx')
-        self.idx_slidery = self.jointnames.index('panda_slidery')
-        self.sliderx_min, self.sliderx_max = -0.0, 0.0
-        self.slidery_min, self.slidery_max = -0.0, 0.0
-        self.slider_weight = 0.5
-
         self.pub = self.create_publisher(Marker, "ball_marker", 10)
         self.pos_pub = self.create_publisher(PointStamped, "ball_position", 10)
         self.vel_pub = self.create_publisher(TwistStamped, "ball_velocity", 10)
@@ -135,7 +127,7 @@ class CombinedNode(Node):
         self.initial_height = 1.0      # must match ball node
         self.reset_eps_z = 0.02        # tolerance on height
         self.reset_eps_v = 0.05        # tolerance on velocity
-        self.g = -9.81         # gravity
+        self.g = -3.0         # gravity
         self.v_paddle = None
         self.have_plan = False     # whether we've computed an intercept
         self.p_start = self.p0     # start pose for spline
@@ -151,7 +143,7 @@ class CombinedNode(Node):
                                (self.dt, 1/self.dt))
 
         self.timer = self.create_timer(self.dt, self.update)
-
+    
 
     def shutdown(self):
         # Destroy the timer, then shut down the node.
@@ -173,13 +165,11 @@ class CombinedNode(Node):
             self.ball_vz = 0.0
             self.ball_vx = 0.0
             self.ball_vy = 0.0
-
-    def clamp_sliders(self, q):
-        q = q.copy()
-        q[self.idx_sliderx] = np.clip(q[self.idx_sliderx], self.sliderx_min, self.sliderx_max)
-        q[self.idx_slidery] = np.clip(q[self.idx_slidery], self.slidery_min, self.slidery_max)
-        return q
+            self.have_plan = False
             
+
+
+
     def ik_to_joints(self, pd, Rd, qi = None, dt=0.01, c=0.5, max_iters=200, tol=1e-4):
         '''
         given desired position/orientation, integrate qdot = pinv(J) * xdot until we reach pose and we get q
@@ -203,17 +193,8 @@ class CombinedNode(Node):
             if np.linalg.norm(pos_err) < tol and np.linalg.norm(rot_err) < tol:
                 return q, True
             # jac for pos, we care about the cartesian position
-            n = J.shape[1]
-            W = np.eye(n)
-            W[self.idx_sliderx, self.idx_sliderx] = self.slider_weight
-            W[self.idx_slidery, self.idx_slidery] = self.slider_weight
-            J_weighted = J @ np.linalg.inv(W)
-            dq_weighted = c * (np.linalg.pinv(J_weighted) @ err)
-            dq = np.linalg.inv(W) @ dq_weighted
-
-            q = q+dq
-            q = self.clamp_sliders(q) 
-        q = self.clamp_sliders(q) 
+            dq = c*(np.linalg.pinv(J)@err)
+            q = q + dq
         return q, False
 
 
@@ -255,6 +236,7 @@ class CombinedNode(Node):
         self.ball_vz = 0.0
         self.ball_vx = 0.0
         self.ball_vy = 0.0
+        
 
 
     def update(self):
@@ -262,15 +244,15 @@ class CombinedNode(Node):
         self.now = self.now + rclpy.time.Duration(seconds=self.dt) 
         self.ball_vel = [self.ball_vx, self.ball_vy, self.ball_vz]
         self.ball_pos = [self.ball_x, self.ball_y, self.ball_z]
-        z  = self.ball_pos[2]
-        vz = self.ball_vel[2]
+        z  = self.ball_z
+        vz = self.ball_vz
         
         # Ball is back near spawn height and almost stationary -> treat as a new trial
-        if (abs(self.ball_z - self.initial_height) < self.reset_eps_z
-                and np.linalg.norm(self.ball_vel) < self.reset_eps_v):
-            if self.have_plan:
-                self.get_logger().info("Ball respawned, clearing old plan.")
-            self.have_plan = False
+        # if (abs(self.ball_z - self.initial_height) < self.reset_eps_z
+        #         and np.linalg.norm(self.ball_vel) < self.reset_eps_v):
+        #     if self.have_plan:
+        #         self.get_logger().info("Ball respawned, clearing old plan.")
+        #     self.have_plan = False
         if (not self.have_plan):
             z0  = self.ball_z
             vz0 = self.ball_vz
@@ -324,8 +306,6 @@ class CombinedNode(Node):
 
                             self.qgoal, self.reach = self.ik_to_joints(self.goal_p, self.goal_R) # also put desired orientation of tip
 
-                            self.qgoal = self.clamp_sliders(self.qgoal)
-
                             pc_goal, Rc_goal, Jv_goal, Jw_goal = self.chain.fkin(self.qgoal)
                             self.qdot_goal = np.linalg.pinv(Jv_goal) @ self.v_paddle
                             print("\n=== COMPUTED LAUNCH VELOCITY ===")
@@ -360,7 +340,8 @@ class CombinedNode(Node):
             # ===== JOINT-SPACE SPLINE q0 -> qgoal =====
             q0dot = np.zeros_like(self.q0)
             qc, qcdot = spline(self.t, self.T, self.q0, self.qgoal, q0dot, self.qdot_goal)
-            qc = self.clamp_sliders(qc)
+
+
 
         self.qc = qc
         self.qcdot = qcdot
@@ -444,6 +425,9 @@ class CombinedNode(Node):
                 # --- Relative velocity (ball w.r.t moving paddle) ---
                 v_rel = v_ball - paddle_v
 
+                v_rel = v_ball - paddle_v
+
+
                 # --- Split into normal and tangential components ---
                 v_rel_n = np.dot(v_rel, n) * n
                 v_rel_t = v_rel - v_rel_n
@@ -458,6 +442,7 @@ class CombinedNode(Node):
                 v_after = v_rel_after + paddle_v
 
                 # --- Update ball velocity ---
+                v_after = (np.linalg.norm(v_ball)) * n
                 self.ball_vx = float(v_after[0])
                 self.ball_vy = float(v_after[1])
                 self.ball_vz = float(v_after[2])
