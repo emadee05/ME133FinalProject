@@ -100,8 +100,9 @@ class CombinedNode(Node):
         self.lam = 20
         self.idx_sliderx = self.jointnames.index('panda_sliderx')
         self.idx_slidery = self.jointnames.index('panda_slidery')
-        self.sliderx_min, self.sliderx_max = -0.13, 0.13
-        self.slidery_min, self.slidery_max = -0.15, 0.15
+        self.sliderx_min, self.sliderx_max = -0.0, 0.0
+        self.slidery_min, self.slidery_max = -0.0, 0.0
+        self.slider_weight = 0.5
 
         self.pub = self.create_publisher(Marker, "ball_marker", 10)
         self.pos_pub = self.create_publisher(PointStamped, "ball_position", 10)
@@ -202,11 +203,17 @@ class CombinedNode(Node):
             if np.linalg.norm(pos_err) < tol and np.linalg.norm(rot_err) < tol:
                 return q, True
             # jac for pos, we care about the cartesian position
-            J[:, self.idx_sliderx] = 0.0
-            J[:, self.idx_slidery] = 0.0
-            dq = c*(np.linalg.pinv(J)@err)
+            n = J.shape[1]
+            W = np.eye(n)
+            W[self.idx_sliderx, self.idx_sliderx] = self.slider_weight
+            W[self.idx_slidery, self.idx_slidery] = self.slider_weight
+            J_weighted = J @ np.linalg.inv(W)
+            dq_weighted = c * (np.linalg.pinv(J_weighted) @ err)
+            dq = np.linalg.inv(W) @ dq_weighted
+
             q = q+dq
             q = self.clamp_sliders(q) 
+        q = self.clamp_sliders(q) 
         return q, False
 
 
