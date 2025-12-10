@@ -29,7 +29,7 @@ class GoalMarker(Node):
         self.ball_y = None
         self.ball_z = None
 
-        self.goal_threshold = 0.1  
+        self.goal_threshold = 0.3
 
         self.spawn_radius = 2.0
         self.timer = self.create_timer(0.1, self.update)
@@ -51,8 +51,8 @@ class GoalMarker(Node):
         )
 
     def update(self):
-        self.publish_goal()
         self.check_hit()
+        self.publish_goal()
 
 
     def check_hit(self):
@@ -86,9 +86,9 @@ class GoalMarker(Node):
         marker.pose.position.z = self.goal_z
         marker.pose.orientation.w = 1.0
 
-        marker.scale.x = 0.2
-        marker.scale.y = 0.2
-        marker.scale.z = 0.2
+        marker.scale.x = 0.6
+        marker.scale.y = 0.6
+        marker.scale.z = 0.6
 
         marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.6)
         self.marker_pub.publish(marker)

@@ -35,11 +35,13 @@ class CombinedNode(Node):
         self.radius = 0.03
         self.ball_vz = 0.0
         self.ball_z = 1.0             # initial height
-        self.restitution = 0.85
+        self.floor_restitution = 0.8
+        self.paddle_restitution = 1
         self.min_bounce = 0.1
         self.initial_height = 2.0
         self.floor = 0.00
         self.ball_launched = False
+        self.v_launch = None
 
         # Ball XY position (currently hardcoded to paddle pos for testing)
         self.ball_x = 0.34
@@ -162,7 +164,7 @@ class CombinedNode(Node):
             msg.y,
             msg.z
         ])
-
+        
     def make_box_marker(self, frame, pos, R, size, color, ns, mid, alpha=0.3):
         m = Marker()
         m.header.frame_id = frame
@@ -332,11 +334,18 @@ class CombinedNode(Node):
                             )
                             self.v_paddle = v_launch - self.ball_vel 
 
+                            self.get_logger().info(
+                                f"[PLAN] goal_p={self.goal_p}, goal_pos={self.goal_pos}, "
+                                f"v_launch={v_launch}, |v_launch|={np.linalg.norm(v_launch):.3f}, "
+                                f"ball_v_at_plan={self.ball_vel}, "
+                                f"v_paddle_des={self.v_paddle}, |v_paddle_des|={np.linalg.norm(self.v_paddle):.3f}"
+                            )
+
                             # HOW TO BUILD THE GOAL ROTATION using v_paddle
                             # self.goal_R = self.R_from_normal(self.v_paddle)# TODOOOO
                             v_in  = np.array(self.ball_vel)
                             v_out = v_launch  # the desired outgoing velocity
-
+                            self.v_launch = v_launch
                             n = v_out - v_in
                             n = n / np.linalg.norm(n)
 
@@ -420,6 +429,7 @@ class CombinedNode(Node):
         #####################
         
 
+
         paddle_pos = pc
         paddle_rot = Rc
 
@@ -476,7 +486,7 @@ class CombinedNode(Node):
 
             touching_z = (rel_pos_local[2] - self.radius) <= half_size[2]
 
-            if in_xy and touching_z:
+            if in_xy and touching_z and not self.ball_launched:
                
                 n = R[:, 2]
                 if n[2] < 0:   # if pointing downward
@@ -492,31 +502,52 @@ class CombinedNode(Node):
 
                 # --- Relative velocity (ball w.r.t moving paddle) ---
                 v_rel = v_ball - paddle_v
+                v_rel_n_scalar = np.dot(v_rel, n)
+                self.get_logger().info(
+                    "[CONTACT PRE] paddle_p="
+                    f"{paddle_pos}, n={n}, "
+                    f"paddle_v={paddle_v}, |paddle_v|={np.linalg.norm(paddle_v):.3f}, "
+                    f"ball_v={v_ball}, |ball_v|={np.linalg.norm(v_ball):.3f}, "
+                    f"v_rel={v_rel}, v_rel_n_scalar={v_rel_n_scalar:.3f}"
+                )
+                if v_rel_n_scalar < 0.0:
 
-                # --- Split into normal and tangential components ---
-                v_rel_n = np.dot(v_rel, n) * n
-                v_rel_t = v_rel - v_rel_n
+                    # v_out = v_in - (1+e) (v_rel · n) n
+                    # v_after = v_ball - (1.0 + self.restitution) * v_rel_n_scalar * n
 
-                # --- Bounce (reflect normal component with restitution) ---
-                v_rel_n_after = -self.restitution * v_rel_n
+                    # --- Split into normal and tangential components ---
+                    v_rel_n = np.dot(v_rel, n) * n
+                    v_rel_t = v_rel - v_rel_n
 
-                # --- New relative velocity ---
-                v_rel_after = v_rel_t + v_rel_n_after
+                    # --- Bounce (reflect normal component with restitution) ---
+                    v_rel_n_after = -self.paddle_restitution * v_rel_n
 
-                # --- Convert back to world frame ---
-                v_after = v_rel_after + paddle_v
+                    # --- New relative velocity ---
+                    v_rel_after = v_rel_t + v_rel_n_after
 
-                # --- Update ball velocity ---
-                # v_after = (np.linalg.norm(v_ball)) * n
-                self.ball_vx = float(v_after[0])
-                self.ball_vy = float(v_after[1])
-                self.ball_vz = float(v_after[2])
+                    # --- Convert back to world frame ---
+                    v_after = v_rel_after + paddle_v
+
+                    # --- Update ball velocity ---
+                    # v_after = (np.linalg.norm(v_ball)) * n
+                    self.ball_vx = float(self.v_launch[0])
+                    self.ball_vy = float(self.v_launch[1])
+                    self.ball_vz = float(self.v_launch[2])
+                    self.get_logger().info(
+                        "[CONTACT POST] v_rel_n="
+                        f"{v_rel_n}, v_rel_t={v_rel_t}, "
+                        f"v_rel_after={v_rel_after}, "
+                        f"v_after={v_after}, |v_after|={np.linalg.norm(v_after):.3f}"
+                    )
+
 
                 # self.get_logger().info(
                 #     f"CONTACT PHYSICS (with paddle motion): v = ({self.ball_vx:.2f}, {self.ball_vy:.2f}, {self.ball_vz:.2f})"
                 # )
 
-                self.ball_launched = True
+                    self.ball_launched = True
+                else:
+                    pass
 
                 # Respawn if bounce becomes too small
                 if abs(self.ball_vz) < self.min_bounce and np.linalg.norm(v_after) < 0.2:
@@ -530,7 +561,7 @@ class CombinedNode(Node):
         # --- Floor collision ---
         if self.ball_z - self.radius <= self.floor:
             self.ball_z = self.floor + self.radius
-            self.ball_vz = -self.ball_vz * self.restitution
+            self.ball_vz = -self.ball_vz * self.floor_restitution
             if abs(self.ball_vz) < self.min_bounce:
                 self.get_logger().error(
                     f"[RESPAWN] FLOOR WEAK BOUNCE | ball_z={self.ball_z:.3f} | vz={self.ball_vz:.3f}"
