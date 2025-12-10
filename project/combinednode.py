@@ -17,6 +17,8 @@ from .KinematicChain import KinematicChain
 from .TrajectoryUtils import *
 from .TransformHelpers import *
 from geometry_msgs.msg import Point
+from tf_transformations import quaternion_from_matrix
+
 
 
 
@@ -35,8 +37,9 @@ class CombinedNode(Node):
         self.ball_z = 1.0             # initial height
         self.restitution = 0.85
         self.min_bounce = 0.1
-        self.initial_height = 1.0
+        self.initial_height = 2.0
         self.floor = 0.00
+        self.ball_launched = False
 
         # Ball XY position (currently hardcoded to paddle pos for testing)
         self.ball_x = 0.34
@@ -117,6 +120,9 @@ class CombinedNode(Node):
             10
         )
 
+        self.paddle_debug_pub = self.create_publisher(Marker, "paddle_debug", 10)
+        self.collision_debug_pub = self.create_publisher(Marker, "collision_debug", 10)
+
         self.get_logger().info("Waiting for a /joint_states subscriber...")
         while(not self.count_subscribers('/joint_states')):
             pass
@@ -126,7 +132,7 @@ class CombinedNode(Node):
         self.have_plan = False
         self.initial_height = 1.0      # must match ball node
         self.reset_eps_z = 0.02        # tolerance on height
-        self.reset_eps_v = 0.05        # tolerance on velocity
+        self.reset_eps_v = 0.05       # tolerance on velocity
         self.g = -3.0         # gravity
         self.v_paddle = None
         self.have_plan = False     # whether we've computed an intercept
@@ -157,6 +163,38 @@ class CombinedNode(Node):
             msg.z
         ])
 
+    def make_box_marker(self, frame, pos, R, size, color, ns, mid, alpha=0.3):
+        m = Marker()
+        m.header.frame_id = frame
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = ns
+        m.id = mid
+        m.type = Marker.CUBE
+        m.action = Marker.ADD
+
+        # Position
+        m.pose.position.x = pos[0]
+        m.pose.position.y = pos[1]
+        m.pose.position.z = pos[2]
+
+        # Orientation from rotation matrix
+        q = quaternion_from_matrix(np.vstack([np.hstack([R, [[0],[0],[0]]]), [0,0,0,1]]))
+        m.pose.orientation.x = q[0]
+        m.pose.orientation.y = q[1]
+        m.pose.orientation.z = q[2]
+        m.pose.orientation.w = q[3]
+
+        # Size
+        m.scale.x = size[0]
+        m.scale.y = size[1]
+        m.scale.z = size[2]
+
+        # Color
+        m.color = ColorRGBA(r=color[0], g=color[1], b=color[2], a=alpha)
+
+        return m
+
+
     def respawn_callback(self, msg):
         if msg.data:
             self.get_logger().info("Received respawn signal from goal node.")
@@ -165,10 +203,13 @@ class CombinedNode(Node):
             self.ball_vz = 0.0
             self.ball_vx = 0.0
             self.ball_vy = 0.0
+            if self.have_plan:
+                self.get_logger().info("Ball respawned, clearing old plan.")
             self.have_plan = False
+            self.ball_launched = False
             
 
-
+            
 
     def ik_to_joints(self, pd, Rd, qi = None, dt=0.01, c=0.5, max_iters=200, tol=1e-4):
         '''
@@ -228,19 +269,16 @@ class CombinedNode(Node):
         x = radius * np.cos(theta)
         y = radius * np.sin(theta)
         return x, y
-
-
-    def respawn_ball(self):
-        self.ball_z = self.initial_height
-        self.ball_x, self.ball_y = self.random_xy()
-        self.ball_vz = 0.0
-        self.ball_vx = 0.0
-        self.ball_vy = 0.0
         
-
 
     def update(self):
         self.t   = self.t   + self.dt
+
+        self.ball_vz += self.g * self.dt
+        self.ball_z += self.ball_vz * self.dt
+        self.ball_x += self.ball_vx * self.dt
+        self.ball_y += self.ball_vy * self.dt
+
         self.now = self.now + rclpy.time.Duration(seconds=self.dt) 
         self.ball_vel = [self.ball_vx, self.ball_vy, self.ball_vz]
         self.ball_pos = [self.ball_x, self.ball_y, self.ball_z]
@@ -253,7 +291,7 @@ class CombinedNode(Node):
         #     if self.have_plan:
         #         self.get_logger().info("Ball respawned, clearing old plan.")
         #     self.have_plan = False
-        if (not self.have_plan):
+        if (not self.have_plan) and (not self.ball_launched):
             z0  = self.ball_z
             vz0 = self.ball_vz
 
@@ -322,10 +360,12 @@ class CombinedNode(Node):
                             )
                             # ----------------------
                         self.have_plan = True
+                        self.just_respawned = False
                         self.get_logger().info(
                             f"Planned intercept: T={self.T:.3f}s, goal_p={self.goal_p}"
                         )
         # COMPUTE THE TRAJECTORY AT THIS TIME INSTANCE.
+
         
         # # === q0 to goal via joint spline 
         if self.t >= self.T:
@@ -378,13 +418,41 @@ class CombinedNode(Node):
         #####################
         #####################
         #####################
-        self.ball_vz += self.g * self.dt
-        self.ball_z += self.ball_vz * self.dt
-        self.ball_x += self.ball_vx * self.dt
-        self.ball_y += self.ball_vy * self.dt
+        
 
         paddle_pos = pc
         paddle_rot = Rc
+
+        collision_size = np.array([
+            self.paddle_size[0] + 2*self.radius,
+            self.paddle_size[1] + 2*self.radius,
+            self.paddle_size[2] + 2*self.radius
+        ])
+
+        paddle_box = self.make_box_marker(
+            frame=self.frame,
+            pos=paddle_pos,
+            R=paddle_rot,
+            size=self.paddle_size,
+            color=(0.0, 1.0, 0.0),
+            ns="paddle_debug",
+            mid=0,
+            alpha=0.15
+        )
+        self.paddle_debug_pub.publish(paddle_box)
+
+        collision_box = self.make_box_marker(
+            frame=self.frame,
+            pos=paddle_pos,
+            R=paddle_rot,
+            size=collision_size,
+            color=(1.0, 0.0, 0.0),
+            ns="coll_debug",
+            mid=1,
+            alpha=0.15
+        )
+        self.collision_debug_pub.publish(collision_box)
+
         # print("paddle_pos:", paddle_pos)
         if paddle_pos is not None and paddle_rot is not None:
            
@@ -447,16 +515,19 @@ class CombinedNode(Node):
                 self.ball_vy = float(v_after[1])
                 self.ball_vz = float(v_after[2])
 
-                self.get_logger().info(
-                    f"CONTACT PHYSICS (with paddle motion): v = ({self.ball_vx:.2f}, {self.ball_vy:.2f}, {self.ball_vz:.2f})"
-                )
+                # self.get_logger().info(
+                #     f"CONTACT PHYSICS (with paddle motion): v = ({self.ball_vx:.2f}, {self.ball_vy:.2f}, {self.ball_vz:.2f})"
+                # )
+
+                self.ball_launched = True
 
                 # Respawn if bounce becomes too small
                 if abs(self.ball_vz) < self.min_bounce and np.linalg.norm(v_after) < 0.2:
                     self.get_logger().info("Bounce too small -> respawn")
-                    self.ball_z = self.initial_height
-                    self.ball_x, self.ball_y = self.random_xy()
-                    self.ball_vx = self.ball_vy = self.ball_vz = 0.0
+                    self.get_logger().error(
+                        f"[RESPAWN] PADDLE WEAK BOUNCE | vz={self.ball_vz:.3f} | speed={np.linalg.norm(v_after):.3f}"
+                    )
+                    self.respawn_callback(Bool(data=True))
 
 
         # --- Floor collision ---
@@ -464,11 +535,10 @@ class CombinedNode(Node):
             self.ball_z = self.floor + self.radius
             self.ball_vz = -self.ball_vz * self.restitution
             if abs(self.ball_vz) < self.min_bounce:
-                self.ball_z = self.initial_height
-                self.ball_x, self.ball_y = self.random_xy()
-                self.ball_vz = 0.0
-                self.ball_vx = 0.0
-                self.ball_vy = 0.0
+                self.get_logger().error(
+                    f"[RESPAWN] FLOOR WEAK BOUNCE | ball_z={self.ball_z:.3f} | vz={self.ball_vz:.3f}"
+                )
+                self.respawn_callback(Bool(data=True))
 
         # Ball marker 
         ball_marker = Marker()
