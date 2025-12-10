@@ -133,7 +133,7 @@ class CombinedNode(Node):
         self.initial_height = 1.0      # must match ball node
         self.reset_eps_z = 0.02        # tolerance on height
         self.reset_eps_v = 0.05       # tolerance on velocity
-        self.g = -3.0         # gravity
+        self.g = -9.8         # gravity
         self.v_paddle = None
         self.have_plan = False     # whether we've computed an intercept
         self.p_start = self.p0     # start pose for spline
@@ -337,7 +337,7 @@ class CombinedNode(Node):
                             v_in  = np.array(self.ball_vel)
                             v_out = v_launch  # the desired outgoing velocity
 
-                            n = v_in - v_out
+                            n = v_out - v_in
                             n = n / np.linalg.norm(n)
 
                             self.goal_R = self.R_from_normal(n)
@@ -493,9 +493,6 @@ class CombinedNode(Node):
                 # --- Relative velocity (ball w.r.t moving paddle) ---
                 v_rel = v_ball - paddle_v
 
-                v_rel = v_ball - paddle_v
-
-
                 # --- Split into normal and tangential components ---
                 v_rel_n = np.dot(v_rel, n) * n
                 v_rel_t = v_rel - v_rel_n
@@ -510,7 +507,7 @@ class CombinedNode(Node):
                 v_after = v_rel_after + paddle_v
 
                 # --- Update ball velocity ---
-                v_after = (np.linalg.norm(v_ball)) * n
+                # v_after = (np.linalg.norm(v_ball)) * n
                 self.ball_vx = float(v_after[0])
                 self.ball_vy = float(v_after[1])
                 self.ball_vz = float(v_after[2])
