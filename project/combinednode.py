@@ -76,16 +76,18 @@ class CombinedNode(Node):
             'panda_joint5',
             'panda_joint6',
             'panda_joint7',
+            'panda_sliderx',
+            'panda_slidery'
         ]
 
         self.jointnames = names
 
         # Set up the kinematic chain object.
-        self.chain = KinematicChain(self, 'panda_link0', 'panda_paddle', self.jointnames)
+        self.chain = KinematicChain(self, 'panda_link0', 'slidery_link', self.jointnames)
 
         # Define the matching initial joint/task positions.        
-        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2]))
-        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0])
+        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2, 0, 0]))
+        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0, 0, 0])
         self.T = 3.0
 
         # === task-space goal
@@ -101,6 +103,8 @@ class CombinedNode(Node):
 
         # Pick the convergence bandwidth.
         self.lam = 20
+        self.idx_sliderx = self.jointnames.index('panda_sliderx')
+        self.idx_slidery = self.jointnames.index('panda_slidery')
         self.pub = self.create_publisher(Marker, "ball_marker", 10)
         self.pos_pub = self.create_publisher(PointStamped, "ball_position", 10)
         self.vel_pub = self.create_publisher(TwistStamped, "ball_velocity", 10)
@@ -222,6 +226,11 @@ class CombinedNode(Node):
             q = self.q0.copy()
         else:
             q = qi.copy()
+        n_joints = len(q)
+        I = np.eye(n_joints)
+        # desired slider values (secondary objective)
+        slider_desired = 0.0
+        k_slider = 0.95 #closer to one means more at the center of the paddle it will try to go
         for k in range(max_iters):
             pc, Rc, Jv, Jw = self.chain.fkin(q)
             pos_err = pd - pc
@@ -236,7 +245,14 @@ class CombinedNode(Node):
             if np.linalg.norm(pos_err) < tol and np.linalg.norm(rot_err) < tol:
                 return q, True
             # jac for pos, we care about the cartesian position
-            dq = c*(np.linalg.pinv(J)@err)
+            dq_primary = c*(np.linalg.pinv(J)@err)
+            # secondary task: pull sders (joints 7,8) toward 0
+            dq_sec = np.zeros_like(q)
+            # assuming joint order: [0..6]=panda, [7]=sliderx, [8]=slidery
+            dq_sec[7] = -k_slider * (q[7] - slider_desired)
+            dq_sec[8] = -k_slider * (q[8] - slider_desired)
+            N = I - np.linalg.pinv(J) @ J
+            dq = dq_primary + N @ dq_sec
             q = q + dq
         return q, False
 
