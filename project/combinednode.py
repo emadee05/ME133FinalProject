@@ -40,6 +40,8 @@ class CombinedNode(Node):
         self.min_bounce = 0.1
         self.initial_height = 2.0
         self.floor = 0.00
+        self.z_hit_trial = 0.0
+
         self.ball_launched = False
         self.v_launch = None
 
@@ -58,6 +60,7 @@ class CombinedNode(Node):
         self.paddle_size = np.array([0.15, 0.2, 0.01])  # x_width, y_width, thickness
 
 
+        self.stretched = np.array([0.0, 0.0, 0.0, -0.07, 0.0, 0.0, 0.0])
         ############## FROM PROJECT #################
         #################
         #################
@@ -76,17 +79,20 @@ class CombinedNode(Node):
             'panda_joint5',
             'panda_joint6',
             'panda_joint7',
+            'panda_sliderx',
+            'panda_slidery',
         ]
 
         self.jointnames = names
 
         # Set up the kinematic chain object.
-        self.chain = KinematicChain(self, 'panda_link0', 'panda_paddle', self.jointnames)
+        self.chain = KinematicChain(self, 'panda_link0', 'slidery_link', self.jointnames)
 
         # Define the matching initial joint/task positions.        
-        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2]))
-        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0])
-        self.T = 3.0
+        self.q0 = (np.array([0, 0.7, -0.3, -1.5, 0.3, 1.9, -1.2, 0, 0]))
+        self.qgoal = np.radians([45, 60, 10, -120, 0, 10, 0, 0, 0])
+        self.T = 4.0
+        self.T_return = 4.0
 
         # === task-space goal
         (self.p0, self.R0, _, _) = self.chain.fkin(self.q0)
@@ -101,6 +107,8 @@ class CombinedNode(Node):
 
         # Pick the convergence bandwidth.
         self.lam = 20
+        self.idx_sliderx = self.jointnames.index('panda_sliderx')
+        self.idx_slidery = self.jointnames.index('panda_slidery')
         self.pub = self.create_publisher(Marker, "ball_marker", 10)
         self.pos_pub = self.create_publisher(PointStamped, "ball_position", 10)
         self.vel_pub = self.create_publisher(TwistStamped, "ball_velocity", 10)
@@ -207,13 +215,91 @@ class CombinedNode(Node):
             self.ball_vy = 0.0
             if self.have_plan:
                 self.get_logger().info("Ball respawned, clearing old plan.")
-            self.have_plan = False
+            # self.have_plan = False
+            z_mid = 0.5 * (self.initial_height + self.floor)
+            self.z_hit_trial = np.random.uniform(z_mid, self.initial_height - 0.05)
             self.ball_launched = False
             
 
+
+    #    # Compute the reference velocities (with errors of last cycle).
+    #    vr = vd + self.lam * eplast
+    #    wr = wd + self.lam * eRlast
+
+
+    #    # Compute the inverse kinematics.
+    #    J     = np.vstack((Jv, Jw))
+
+    #    xrdot = np.concatenate((vr, wr))
+    #    Jdinv = J.T @ np.linalg.inv(J@J.T + self.gamma**2*np.eye(6))
+
+    #    lambd = 1
+    #    qsecondary_dot = np.array([0,0,0,lambd*(-pi/2 - self.qc[3]), 0.0, 0.0, 0.0])
+    # #    qcdot = Jdinv @ xrdot
+    #    qcdot = Jdinv@xrdot + (np.eye(7) - Jdinv @ J) @ qsecondary_dot
+
+
+    #    # Integrate the joint position.
+    #    qc = qclast + self.dt * qcdot
+
+
+    #    # Compute the new forward kinematics for equivalent task commands.
+    #    (pc, Rc, _, _) = self.chain.fkin(qc)
+
+       
+    #    # Save the joixnt command position and task errors.
+    #    self.qc = qc
+    #    self.ep = ep(pd, pc)
+    #    self.eR = eR(Rd, Rc)
+
+
+    #    diag = np.diag([1/self.L, 1/self.L, 1/self.L, 1, 1, 1])
+    #    Jbar = diag@J
+    #    condition = np.linalg.cond(Jbar)
+    def weighted_damped_pinv(self, J, W, gamma):
+        """
+        Weighted, damped pseudoinverse of J with joint-space weight W.
+        Minimizes ||dq||_W subject to J dq ≈ xdot.
+        W must be n×n, symmetric positive definite.
+        """
+        m, n = J.shape
+        W_inv = np.linalg.inv(W)
+        return W_inv @ J.T @ np.linalg.inv(J @ W_inv @ J.T + gamma**2 * np.eye(m))
+
+
+    def damped_pinv(self, J, gamma):
+        """
+        Damped (Tikhonov-regularized) pseudoinverse of J.
+        gamma > 0 is the damping coefficient.
+        """
+        m, n = J.shape
+        return J.T @ np.linalg.inv(J@J.T + gamma**2*np.eye(m))  # n×m
+
+                    
+    def arm_is_ready(self):
+        pos_err = np.linalg.norm(self.qc - self.q0)
+        vel_err = np.linalg.norm(self.qcdot) if hasattr(self, "qcdot") else 0.0
+        return (pos_err < 0.05) and (vel_err < 0.1)
+
+
+    #    qsecondary_dot = np.array([0,0,0,lambd*(-pi/2 - self.qc[3]), 0.0, 0.0, 0.0])
+    # #    qcdot = Jdinv @ xrdot
+    #    qcdot = Jdinv@xrdot + (np.eye(7) - Jdinv @ J) @ qsecondary_dot
+
+
+    #    # Integrate the joint position.
+    #    qc = qclast + self.dt * qcdot
+
+            # if ball in front, use fornt as initial guess
+            # if behind use back as initial guess
+            # smart initial guess that helps newton raphson out 
+            # newton raphson is a lil blind, if you can go anywhere, NR will just go in whatever path, will jump into different branches along the way
+            # secondary tasks will be hard to control 
+            # intial guess that is somewhat closeish (in the same hemisphere) 
+
             
 
-    def ik_to_joints(self, pd, Rd, qi = None, dt=0.01, c=0.5, max_iters=200, tol=1e-4):
+    def ik_to_joints(self, pd, Rd, gamma=0.25, qi = None, dt=0.01, c=0.25, max_iters=200, tol=1e-4, dq_tol=1e-5):
         '''
         given desired position/orientation, integrate qdot = pinv(J) * xdot until we reach pose and we get q
         returns the q and if it can reach
@@ -222,6 +308,13 @@ class CombinedNode(Node):
             q = self.q0.copy()
         else:
             q = qi.copy()
+
+        n_joints = len(q)
+        I = np.eye(n_joints)
+        # desired slider values (secondary objective)
+        slider_desired = 0.0
+        k_slider = 0.95 #closer to one means more at the center of the paddle it will try to go
+
         for k in range(max_iters):
             pc, Rc, Jv, Jw = self.chain.fkin(q)
             pos_err = pd - pc
@@ -232,13 +325,58 @@ class CombinedNode(Node):
             rot_err = Rc @ paddle_err
             
             err = np.hstack((pos_err, rot_err))
+            err_norm = np.linalg.norm(err)
+            # case 1: reaches desired pos 
+
+            # J = np.vstack((Jv, Jw))
+            # J_dinv = self.damped_pinv(J, gamma)
+            # lambd = 0.25
+            
+            # qsecondary_dot = np.array([0, 0, 0, lambd*(-pi/2 - q[3]), 0.0, 0.0, 0.0])
+            # In = np.eye(J.shape[1])
+            # dq = c *( (J_dinv @ err) + (In - J_dinv @ J) @ qsecondary_dot)
+
+
+
             J = np.vstack((Jv, Jw))
-            if np.linalg.norm(pos_err) < tol and np.linalg.norm(rot_err) < tol:
-                return q, True
+
+            # Joint-space weight: make joint 4 expensive to move
+            # (so it tends to stay near its initial value, which is ~ -pi/2)
+            w = np.array([1.0, 1.0, 5.0, 10.0, 5.0, 1.0, 1.0, 1.0, 1.0])   # tune 10.0
+            W = np.diag(w)
+
+            J_dinv = self.weighted_damped_pinv(J, W, gamma)
+
+            # No explicit secondary task here
+            # dq = c * (J_dinv @ err)
+
+            dq_primary = c * (J_dinv @ err)
+            # secondary task: pull sders (joints 7,8) toward 0
+            dq_sec = np.zeros_like(q)
+            # assuming joint order: [0..6]=panda, [7]=sliderx, [8]=slidery
+            dq_sec[7] = -k_slider * (q[7] - slider_desired)
+            dq_sec[8] = -k_slider * (q[8] - slider_desired)
+            N = I - np.linalg.pinv(J) @ J
+            dq = dq_primary + N @ dq_sec
+
             # jac for pos, we care about the cartesian position
-            dq = c*(np.linalg.pinv(J)@err)
+            dq_norm = np.linalg.norm(dq) 
+            # case 1
+            if err_norm < tol and dq_norm<tol:
+                return q, "reached"
+            # DAMPED INVERSEEEEEEEEEEEEE
+
+            if err_norm > tol and dq_norm<tol:
+                return q, "min"
+            
+            # 1st case: error goes to 0, dq goes to 0
+            # 2nd case: error goes to minimum, dq goes to 0
+            # 3rd case: keeps bouncing, unlikely but can happen, nothing ever converges 
+            # never converged error flag  
+
+            # arm stretched out, convergence to nonzero error 
             q = q + dq
-        return q, False
+        return q, "oscillating"
 
 
     def R_from_normal(self, n_world: np.ndarray):
@@ -270,7 +408,7 @@ class CombinedNode(Node):
         theta = np.random.uniform(0, 2*np.pi)
         x = radius * np.cos(theta)
         y = radius * np.sin(theta)
-        return x, y
+        return x,y
         
 
     def update(self):
@@ -293,13 +431,16 @@ class CombinedNode(Node):
         #     if self.have_plan:
         #         self.get_logger().info("Ball respawned, clearing old plan.")
         #     self.have_plan = False
-        if (not self.have_plan) and (not self.ball_launched):
+        if (not self.have_plan) and (not self.ball_launched) and self.arm_is_ready():
             z0  = self.ball_z
             vz0 = self.ball_vz
 
             # Use current paddle height as target hit height
             pc_current, Rc_current, _, _ = self.chain.fkin(self.qc)
-            z_hit = pc_current[2]  # you can add ball radius here if needed
+            z_floor = self.floor + self.radius
+            z_mid   = 0.5 * (self.initial_height + z_floor)
+
+            z_hit = 0.15 # you can add ball radius here if needed
 
             # Only plan if ball is above paddle and moving downward
             if (z0 > z_hit) and (vz0 < 0.0):
@@ -352,15 +493,19 @@ class CombinedNode(Node):
                             self.goal_R = self.R_from_normal(n)
 
                             self.qgoal, self.reach = self.ik_to_joints(self.goal_p, self.goal_R) # also put desired orientation of tip
-
+                            print("ASDKJFASLKDJF" + self.reach)
                             pc_goal, Rc_goal, Jv_goal, Jw_goal = self.chain.fkin(self.qgoal)
-                            self.qdot_goal = np.linalg.pinv(Jv_goal) @ self.v_paddle
-                            print("\n=== COMPUTED LAUNCH VELOCITY ===")
-                            print("goal_p:", self.goal_p)
-                            print("goal_pos:", self.goal_pos)
-                            print("v_launch:", v_launch)
-                            print("speed:", np.linalg.  norm(v_launch))
-                            print("================================\n")
+                            # self.qdot_goal = np.linalg.pinv(Jv_goal) @ self.v_paddle
+                            gamma=0.5
+                            Jv_dinv = self.damped_pinv(Jv_goal, gamma)  # smaller gamma_qdot like 0.1
+                            self.qdot_goal = Jv_dinv @ self.v_paddle
+
+                            # print("\n=== COMPUTED LAUNCH VELOCITY ===")
+                            # print("goal_p:", self.goal_p)
+                            # print("goal_pos:", self.goal_pos)
+                            # print("v_launch:", v_launch)
+                            # print("speed:", np.linalg.  norm(v_launch))
+                            # print("================================\n")
 
                             # ----- PASSING OVER THE NEW BALL LAUNCH VELOCITY -----
                             speed = np.linalg.norm(v_launch)
@@ -376,30 +521,76 @@ class CombinedNode(Node):
         # COMPUTE THE TRAJECTORY AT THIS TIME INSTANCE.
 
         
+
         # # === q0 to goal via joint spline 
-        if self.t >= self.T:
-            # self.t = self.T
 
-            # ===== HOLD FINAL JOINT POSITION =====
-            qc    = self.qgoal.copy()
-            qcdot = np.zeros_like(self.qgoal)
-            
-        
-        else:
-            # ===== JOINT-SPACE SPLINE q0 -> qgoal =====
+        if self.t < self.T:
             q0dot = np.zeros_like(self.q0)
-            qc, qcdot = spline(self.t, self.T, self.q0, self.qgoal, q0dot, self.qdot_goal)
-
-
+            qc, qcdot = spline(self.t,
+                            self.T,
+                            self.q0, self.qgoal,
+                            q0dot, self.qdot_goal)
+        elif self.t < self.T + self.T_return:
+            # ----- segment 2: goal -> initial -----
+            t_ret = self.t - self.T           # local time in return segment
+            qgoal_dot_end = np.zeros_like(self.q0)
+            qc, qcdot = spline(t_ret,
+                            self.T_return,
+                            self.qgoal, self.q0,
+                            self.qdot_goal, qgoal_dot_end)
+        else:
+            # ----- done, hold at initial -----
+            qc    = self.q0.copy()
+            qcdot = np.zeros_like(self.q0)
+        # else:
+        #     # ===== JOINT-SPACE SPLINE q0 -> qgoal =====
+        #     q0dot = np.zeros_like(self.q0)
+        #     qc, qcdot = spline(self.t, self.T, self.q0, self.qgoal, q0dot, self.qdot_goal)
 
         self.qc = qc
-        self.qcdot = qcdot
 
         pc, Rc, Jv, Jw = self.chain.fkin(self.qc)
-        vd = Jv @ qcdot
-        wd = Jw @ qcdot
-        pd = pc 
+
+        if self.t < self.T:
+            # ===== INTERCEPT SEGMENT: trust the spline =====
+            # Just use the spline velocity directly
+            self.qcdot = qcdot
+            vd = Jv @ qcdot
+            wd = Jw @ qcdot
+        else:
+            # ===== RETURN SEGMENT: apply nullspace posture control =====
+            vd_spline = Jv @ qcdot
+            wd_spline = Jw @ qcdot
+            xrdot = np.concatenate((vd_spline, wd_spline))
+
+            J = np.vstack((Jv, Jw))
+            gamma = 0.25
+            J_dinv = self.damped_pinv(J, gamma)
+
+            lambda_sec = 0.5
+            qsecondary_dot = np.zeros_like(self.qc)
+            qsecondary_dot[3] = lambda_sec * (-pi/2 - self.qc[3])
+
+            In = np.eye(J.shape[1])
+            qcdot_corr = J_dinv @ xrdot + (In - J_dinv @ J) @ qsecondary_dot
+
+            self.qcdot = qcdot_corr
+            vd = Jv @ qcdot_corr
+            wd = Jw @ qcdot_corr
+        if self.t >= self.T + self.T_return:
+            self.have_plan = False
+
+        pd = pc
         Rd = Rc
+
+        # self.qc = qc
+        # self.qcdot = qcdot
+
+        # pc, Rc, Jv, Jw = self.chain.fkin(self.qc)
+        # vd = Jv @ qcdot
+        # wd = Jw @ qcdot
+        # pd = pc 
+        # Rd = Rc
 
 
         header=Header(stamp=self.now.to_msg(), frame_id='panda_link0')

@@ -69,7 +69,7 @@ class GoalMarker(Node):
             self.get_logger().info(
                 f"Ball reached goal! dist={dist:.3f}. Respawning goal."
             )
-            self.respawn_pub.publish(Bool(data=True))
+            # self.respawn_pub.publish(Bool(data=True))
             self.respawn_goal()
 
     def publish_goal(self):

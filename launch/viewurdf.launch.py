@@ -68,6 +68,14 @@ def generate_launch_description():
         executable = 'combined_node',
         output     = 'screen')
 
+    node_gui = Node(
+        name       = 'gui', 
+        package    = 'joint_state_publisher_gui',
+        executable = 'joint_state_publisher_gui',
+        output     = 'screen',
+        on_exit    = Shutdown())
+
+
 
     ######################################################################
     # RETURN THE ELEMENTS IN ONE LIST
@@ -75,5 +83,6 @@ def generate_launch_description():
         # Start the robot_state_publisher, RVIZ, and the trajectory.
         node_robot_state_publisher,
         node_rviz,
+        # node_gui,
         # node_trajectory,
     ])
