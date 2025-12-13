@@ -143,7 +143,7 @@ class CombinedNode(Node):
         self.initial_height = 1.0      # must match ball node
         self.reset_eps_z = 0.02        # tolerance on height
         self.reset_eps_v = 0.05       # tolerance on velocity
-        self.g = -9.8         # gravity
+        self.g = -5         # gravity
         self.v_paddle = None
         self.have_plan = False     # whether we've computed an intercept
         self.p_start = self.p0     # start pose for spline
@@ -297,7 +297,44 @@ class CombinedNode(Node):
             # secondary tasks will be hard to control 
             # intial guess that is somewhat closeish (in the same hemisphere) 
 
-            
+    def joint_barrier(self, q4, q4_max=np.pi, margin=0.15):
+        """
+        Smooth repulsive velocity pushing q4 away from |q4| = q4_max.
+        margin: radians before the limit where repulsion starts.
+        """
+        d = q4_max - abs(q4)
+        if d > margin:
+            return 0.0
+
+        # Quadratic repulsion near boundary
+        strength = (margin - d) / margin
+        return -np.sign(q4) * 3.0 * strength
+
+    def wrap_angle(self, a):
+        return (a + np.pi) % (2*np.pi) - np.pi
+
+    def initial_guess_from_quadrant(self, pd):
+        qi = self.qc.copy()
+        x, y, z = pd
+
+        theta = np.arctan2(y, x)
+
+        # Blend base yaw instead of overwrite
+        qi[0] = self.wrap_angle(0.85 * qi[0] + 0.15 * theta)
+
+        # Choose desired elbow branch, but only NUDGE toward it
+        desired_elbow = (-np.pi/2) if (x >= 0) else (+np.pi/2)
+
+        alpha = 0.10  # small!!
+        qi[3] = (1 - alpha) * qi[3] + alpha * desired_elbow
+
+        # keep it reasonable
+        qi[3] = np.clip(qi[3], -2.8, 2.8)
+
+        # sliders centered
+        qi[7] = 0.0
+        qi[8] = 0.0
+        return qi
 
     def ik_to_joints(self, pd, Rd, gamma=0.25, qi = None, dt=0.01, c=0.25, max_iters=200, tol=1e-4, dq_tol=1e-5):
         '''
@@ -305,7 +342,7 @@ class CombinedNode(Node):
         returns the q and if it can reach
         '''
         if qi is None:
-            q = self.q0.copy()
+            q = self.initial_guess_from_quadrant(pd)
         else:
             q = qi.copy()
 
@@ -353,6 +390,8 @@ class CombinedNode(Node):
             dq_primary = c * (J_dinv @ err)
             # secondary task: pull sders (joints 7,8) toward 0
             dq_sec = np.zeros_like(q)
+            dq_sec[3] = self.joint_barrier(q[3])
+            dq_sec[5] = self.joint_barrier(q[5], q4_max=np.pi/2)
             # assuming joint order: [0..6]=panda, [7]=sliderx, [8]=slidery
             dq_sec[7] = -k_slider * (q[7] - slider_desired)
             dq_sec[8] = -k_slider * (q[8] - slider_desired)
@@ -408,7 +447,7 @@ class CombinedNode(Node):
         theta = np.random.uniform(0, 2*np.pi)
         x = radius * np.cos(theta)
         y = radius * np.sin(theta)
-        return x,y
+        return 2.0, 2.0
         
 
     def update(self):
@@ -501,10 +540,25 @@ class CombinedNode(Node):
                             # HOW TO BUILD THE GOAL ROTATION using v_paddle
                             # self.goal_R = self.R_from_normal(self.v_paddle)# TODOOOO
                             v_in  = np.array(self.ball_vel)
-                            v_out = v_launch  # the desired outgoing velocity
+                            v_out = v_launch
                             self.v_launch = v_launch
-                            n = v_out - v_in
-                            n = n / np.linalg.norm(n)
+
+                            n_phys = v_out - v_in
+                            n_phys = n_phys / np.linalg.norm(n_phys)
+
+                            # paddle pose
+                            pc_now, Rc_now, _, _ = self.chain.fkin(self.q0)
+
+                            # Ball hit position in paddle local frame
+                            rel_hit_world = self.goal_p - pc_now
+                            rel_hit_local = Rc_now.T @ rel_hit_world
+
+                            if rel_hit_local[2] >= 0.0:
+                                n = n_phys
+                            else:
+                                n = -n_phys
+
+                            self.goal_R = self.R_from_normal(n)
 
                             self.goal_R = self.R_from_normal(n)
 
