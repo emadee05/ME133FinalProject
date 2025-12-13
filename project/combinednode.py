@@ -144,7 +144,7 @@ class CombinedNode(Node):
         self.initial_height = 1.0      # must match ball node
         self.reset_eps_z = 0.02        # tolerance on height
         self.reset_eps_v = 0.05       # tolerance on velocity
-        self.g = -9.8         # gravity
+        self.g = -4         # gravity
         self.v_paddle = None
         self.have_plan = False     # whether we've computed an intercept
         self.p_start = self.p0     # start pose for spline
@@ -300,7 +300,7 @@ class CombinedNode(Node):
 
             
 
-    def ik_to_joints(self, pd, Rd, gamma=0.25, qi = None, dt=0.01, c=0.25, max_iters=200, tol=2e-3, dq_tol=1e-5):
+    def ik_to_joints(self, pd, Rd, gamma=0.25, qi = None, dt=0.01, c=0.2, max_iters=1000, tol=0.01, dq_tol=1e-3):
         '''
         given desired position/orientation, integrate qdot = pinv(J) * xdot until we reach pose and we get q
         returns the q and if it can reach
@@ -346,7 +346,7 @@ class CombinedNode(Node):
             w = np.array([1.0, 1.0, 5.0, 10.0, 5.0, 1.0, 1.0, 1.0, 1.0])   # tune 10.0
             W = np.diag(w)
 
-            J_dinv = self.weighted_damped_pinv(J, W, gamma)
+            J_dinv = self.damped_pinv(J,gamma)
 
             # No explicit secondary task here
             # dq = c * (J_dinv @ err)
@@ -357,26 +357,32 @@ class CombinedNode(Node):
             # assuming joint order: [0..6]=panda, [7]=sliderx, [8]=slidery
             dq_sec[7] = -k_slider * (q[7] - slider_desired)
             dq_sec[8] = -k_slider * (q[8] - slider_desired)
-            N = I - self.damped_pinv(J,gamma) @ J
-            dq = dq_primary + N @ dq_sec
+            N = I - J_dinv @ J
+            dq = dq_primary + 0.5* N @ dq_sec
 
             # jac for pos, we care about the cartesian position
             dq_norm = np.linalg.norm(dq_primary) 
             # case 1
             # if np.linalg.norm(dq_primary) < tol and dq_norm < tol:
             #     return q, "reached"
-            if np.linalg.norm(pos_err) < tol and np.linalg.norm(rot_err) < tol:
-                return q, "reached"
+            # if err_norm < tol and dq_norm<tol:
+            #     return q, "reached"
 
             # DAMPED INVERSEEEEEEEEEEEEE
 
-            if err_norm > tol and dq_norm<tol:
-                return q, "min"
+            # if err_norm > tol and dq_norm<tol:
+            #     return q, "min"
             
             # 1st case: error goes to 0, dq goes to 0
             # 2nd case: error goes to minimum, dq goes to 0
             # 3rd case: keeps bouncing, unlikely but can happen, nothing ever converges 
             # never converged error flag  
+            if err_norm < tol and dq_norm < dq_tol:
+                return q, "reached"
+            
+            # Case 2: Stuck at local minimum (step size small but error still large)
+            if dq_norm < dq_tol and err_norm > tol:
+                return q, "stuck"
 
             # arm stretched out, convergence to nonzero error 
             q = q + dq
@@ -602,7 +608,7 @@ class CombinedNode(Node):
             xrdot = np.concatenate((vd_spline, wd_spline))
 
             J = np.vstack((Jv, Jw))
-            gamma = 0.25
+            gamma = 0.5
             J_dinv = self.damped_pinv(J, gamma)
 
             lambda_sec = 0.5
@@ -804,7 +810,7 @@ class CombinedNode(Node):
                     self.ball_vz = float(v_after[2])
                     
                     self.get_logger().info(
-                        f"actual velocity={v_after}, desired_vel{self.v_launch}, diff={(self.v_launch-v_after)}" 
+                        f"des paddle vel = {self.v_paddle}, paddle vel = {paddle_v}, actual velocity={v_after}, desired_vel{self.v_launch}, diff={(self.v_launch-v_after)}" 
                     )
                     self.ball_launched = True
                 else:
