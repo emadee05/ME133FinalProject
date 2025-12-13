@@ -440,7 +440,23 @@ class CombinedNode(Node):
             z_floor = self.floor + self.radius
             z_mid   = 0.5 * (self.initial_height + z_floor)
 
-            z_hit = 0.15 # you can add ball radius here if needed
+            # Choose hit z so (x_hit, y_hit, z_hit) lies on a hemisphere of radius R_hit
+            R_hit = 0.75
+
+            # Sphere center in panda_link0 frame (around the arm base)
+            cx, cy, cz = 0.0, 0.0, 0.0   # sphere center
+            x_hit = self.ball_x
+            y_hit = self.ball_y
+
+            dx = x_hit - cx
+            dy = y_hit - cy
+            r_xy2 = dx*dx + dy*dy  # <-- (x - cx)^2 + (y - cy)^2
+
+            if r_xy2 >= R_hit**2:
+                # too far out, no real sqrt
+                z_hit = 0.15
+            else:
+                z_hit = cz + np.sqrt(R_hit**2 - r_xy2)
 
             # Only plan if ball is above paddle and moving downward
             if (z0 > z_hit) and (vz0 < 0.0):
