@@ -141,7 +141,7 @@ class CombinedNode(Node):
         self.ball_vel = None   # np.array([vx, vy, vz])
         self.goal_pos = None # np.array([x,y,z])
         self.have_plan = False
-        self.initial_height = 1.0      # must match ball node
+        self.initial_height = 2.0      # must match ball node
         self.reset_eps_z = 0.02        # tolerance on height
         self.reset_eps_v = 0.05       # tolerance on velocity
         self.g = -4         # gravity
@@ -300,7 +300,7 @@ class CombinedNode(Node):
 
             
 
-    def ik_to_joints(self, pd, Rd, gamma=0.25, qi = None, dt=0.01, c=0.2, max_iters=1000, tol=0.01, dq_tol=1e-3):
+    def ik_to_joints(self, pd, Rd, gamma=0.05, qi = None, dt=0.01, c=0.2, max_iters=1000, tol=0.01, dq_tol=1e-3):
         '''
         given desired position/orientation, integrate qdot = pinv(J) * xdot until we reach pose and we get q
         returns the q and if it can reach
@@ -488,7 +488,7 @@ class CombinedNode(Node):
                         self.T = float(t_hit)
                         self.t = 0.0  # reset internal time
 
-                        self.p_start, self.R_start, _, _ = self.chain.fkin(self.qc)
+                        self.p_start, self.R_start, _, _ = self.chain.fkin(self.q0)
 
                         x_hit = self.ball_x
                         y_hit = self.ball_y
@@ -510,7 +510,7 @@ class CombinedNode(Node):
                             n_phys = n_phys / np.linalg.norm(n_phys)
 
                             # paddle pose
-                            pc_now, Rc_now, _, _ = self.chain.fkin(self.q0)
+                            pc_now, Rc_now, _, _ = self.chain.fkin(self.qc)
 
                             # Ball hit position in paddle local frame
                             rel_hit_world = self.goal_p - pc_now
@@ -529,6 +529,8 @@ class CombinedNode(Node):
                             self.v_ball_at_hit = v_ball_hit
                             v_ball_n  = np.dot(v_ball_hit, n)
                             v_launch = np.dot(v_launch, n)
+                            # v_paddle = ( (self.m_ball + self.m_paddle) / (2 * self.m_paddle) ) * (v_launch - ( (self.m_ball - self.m_paddle) / self.m_ball ) * v_ball_n)
+
                             v_pad = ((self.m_ball * v_launch + self.m_paddle * v_launch) - (self.m_ball * v_ball_n))/self.m_paddle
                             self.v_paddle = v_pad * n
 
@@ -540,8 +542,10 @@ class CombinedNode(Node):
                             # self.qdot_goal = np.linalg.pinv(Jv_goal) @ self.v_paddle
                             gamma=0.5
                             Jv_dinv = self.damped_pinv(Jv_goal, gamma)  # smaller gamma_qdot like 0.1
-                            self.qdot_goal = Jv_dinv @ self.v_paddle
-
+                            self.qdot_goal = 2*Jv_dinv @ self.v_paddle
+                            self.get_logger().info(
+                                f"jvpaddle: {Jv_goal@self.qdot_goal}, des: {self.v_paddle}"
+                            )
                             # print("\n=== COMPUTED LAUNCH VELOCITY ===")
                             # print("goal_p:", self.goal_p)
                             # print("goal_pos:", self.goal_pos)
@@ -800,14 +804,15 @@ class CombinedNode(Node):
                     v_ball_n_after = (
                         (m_ball* v_ball_n) + (m_paddle * v_paddle_n)
                     ) / (m_ball + m_paddle)
+                    # v_ball_after_n = ((m_ball - m_paddle) / (m_ball + m_paddle)) * v_rel_n_scalar + (2 * m_paddle / (m_ball + m_paddle)) * np.dot(paddle_v, n)
 
                     # Recombine: tangential unchanged, normal updated
                     v_after = v_ball_t + v_ball_n_after * n
 
                     # Update ball velocity (THIS replaces using self.v_launch)
-                    self.ball_vx = float(v_after[0])
-                    self.ball_vy = float(v_after[1])
-                    self.ball_vz = float(v_after[2])
+                    self.ball_vx = float(self.v_launch[0])
+                    self.ball_vy = float(self.v_launch[1])
+                    self.ball_vz = float(self.v_launch[2])
                     
                     self.get_logger().info(
                         f"des paddle vel = {self.v_paddle}, paddle vel = {paddle_v}, actual velocity={v_after}, desired_vel{self.v_launch}, diff={(self.v_launch-v_after)}" 
