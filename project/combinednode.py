@@ -59,7 +59,8 @@ class CombinedNode(Node):
         # Paddle size (hardcoded for now)
         self.paddle_size = np.array([0.15, 0.2, 0.01])  # x_width, y_width, thickness
 
-
+        self.m_ball = 0.02
+        self.m_paddle = 10
         self.stretched = np.array([0.0, 0.0, 0.0, -0.07, 0.0, 0.0, 0.0])
         ############## FROM PROJECT #################
         #################
@@ -104,7 +105,7 @@ class CombinedNode(Node):
         self.qc = self.q0.copy()
         self.ep = vzero()
         self.eR = vzero()
-
+        self.n_plan = None
         # Pick the convergence bandwidth.
         self.lam = 20
         self.idx_sliderx = self.jointnames.index('panda_sliderx')
@@ -143,12 +144,12 @@ class CombinedNode(Node):
         self.initial_height = 1.0      # must match ball node
         self.reset_eps_z = 0.02        # tolerance on height
         self.reset_eps_v = 0.05       # tolerance on velocity
-        self.g = -5         # gravity
+        self.g = -9.8         # gravity
         self.v_paddle = None
         self.have_plan = False     # whether we've computed an intercept
         self.p_start = self.p0     # start pose for spline
         self.R_start = self.R0
-
+        self.v_ball_at_hit = None
         # Set up the timer to update at 100Hz, with (t=0) occuring in
         # the first update cycle (dt) from now.
         self.dt    = 0.01                       # 100Hz.
@@ -297,52 +298,15 @@ class CombinedNode(Node):
             # secondary tasks will be hard to control 
             # intial guess that is somewhat closeish (in the same hemisphere) 
 
-    def joint_barrier(self, q4, q4_max=np.pi, margin=0.15):
-        """
-        Smooth repulsive velocity pushing q4 away from |q4| = q4_max.
-        margin: radians before the limit where repulsion starts.
-        """
-        d = q4_max - abs(q4)
-        if d > margin:
-            return 0.0
+            
 
-        # Quadratic repulsion near boundary
-        strength = (margin - d) / margin
-        return -np.sign(q4) * 3.0 * strength
-
-    def wrap_angle(self, a):
-        return (a + np.pi) % (2*np.pi) - np.pi
-
-    def initial_guess_from_quadrant(self, pd):
-        qi = self.qc.copy()
-        x, y, z = pd
-
-        theta = np.arctan2(y, x)
-
-        # Blend base yaw instead of overwrite
-        qi[0] = self.wrap_angle(0.85 * qi[0] + 0.15 * theta)
-
-        # Choose desired elbow branch, but only NUDGE toward it
-        desired_elbow = (-np.pi/2) if (x >= 0) else (+np.pi/2)
-
-        alpha = 0.10  # small!!
-        qi[3] = (1 - alpha) * qi[3] + alpha * desired_elbow
-
-        # keep it reasonable
-        qi[3] = np.clip(qi[3], -2.8, 2.8)
-
-        # sliders centered
-        qi[7] = 0.0
-        qi[8] = 0.0
-        return qi
-
-    def ik_to_joints(self, pd, Rd, gamma=0.25, qi = None, dt=0.01, c=0.25, max_iters=200, tol=1e-4, dq_tol=1e-5):
+    def ik_to_joints(self, pd, Rd, gamma=0.25, qi = None, dt=0.01, c=0.25, max_iters=200, tol=2e-3, dq_tol=1e-5):
         '''
         given desired position/orientation, integrate qdot = pinv(J) * xdot until we reach pose and we get q
         returns the q and if it can reach
         '''
         if qi is None:
-            q = self.initial_guess_from_quadrant(pd)
+            q = self.q0.copy()
         else:
             q = qi.copy()
 
@@ -390,19 +354,20 @@ class CombinedNode(Node):
             dq_primary = c * (J_dinv @ err)
             # secondary task: pull sders (joints 7,8) toward 0
             dq_sec = np.zeros_like(q)
-            dq_sec[3] = self.joint_barrier(q[3])
-            dq_sec[5] = self.joint_barrier(q[5], q4_max=np.pi/2)
             # assuming joint order: [0..6]=panda, [7]=sliderx, [8]=slidery
             dq_sec[7] = -k_slider * (q[7] - slider_desired)
             dq_sec[8] = -k_slider * (q[8] - slider_desired)
-            N = I - np.linalg.pinv(J) @ J
+            N = I - self.damped_pinv(J,gamma) @ J
             dq = dq_primary + N @ dq_sec
 
             # jac for pos, we care about the cartesian position
-            dq_norm = np.linalg.norm(dq) 
+            dq_norm = np.linalg.norm(dq_primary) 
             # case 1
-            if err_norm < tol and dq_norm<tol:
+            # if np.linalg.norm(dq_primary) < tol and dq_norm < tol:
+            #     return q, "reached"
+            if np.linalg.norm(pos_err) < tol and np.linalg.norm(rot_err) < tol:
                 return q, "reached"
+
             # DAMPED INVERSEEEEEEEEEEEEE
 
             if err_norm > tol and dq_norm<tol:
@@ -447,7 +412,7 @@ class CombinedNode(Node):
         theta = np.random.uniform(0, 2*np.pi)
         x = radius * np.cos(theta)
         y = radius * np.sin(theta)
-        return 2.0, 2.0
+        return x,y
         
 
     def update(self):
@@ -528,14 +493,6 @@ class CombinedNode(Node):
                             v_launch = self.compute_launch_v_goal(
                                 self.goal_p, self.goal_pos, T_flight
                             )
-                            self.v_paddle = v_launch - self.ball_vel 
-
-                            self.get_logger().info(
-                                f"[PLAN] goal_p={self.goal_p}, goal_pos={self.goal_pos}, "
-                                f"v_launch={v_launch}, |v_launch|={np.linalg.norm(v_launch):.3f}, "
-                                f"ball_v_at_plan={self.ball_vel}, "
-                                f"v_paddle_des={self.v_paddle}, |v_paddle_des|={np.linalg.norm(self.v_paddle):.3f}"
-                            )
 
                             # HOW TO BUILD THE GOAL ROTATION using v_paddle
                             # self.goal_R = self.R_from_normal(self.v_paddle)# TODOOOO
@@ -543,7 +500,7 @@ class CombinedNode(Node):
                             v_out = v_launch
                             self.v_launch = v_launch
 
-                            n_phys = v_out - v_in
+                            n_phys = v_out 
                             n_phys = n_phys / np.linalg.norm(n_phys)
 
                             # paddle pose
@@ -553,12 +510,21 @@ class CombinedNode(Node):
                             rel_hit_world = self.goal_p - pc_now
                             rel_hit_local = Rc_now.T @ rel_hit_world
 
+
                             if rel_hit_local[2] >= 0.0:
                                 n = n_phys
                             else:
                                 n = -n_phys
 
-                            self.goal_R = self.R_from_normal(n)
+                            self.n_plan = n.copy()
+                            v_ball_now = np.array([self.ball_vx, self.ball_vy, self.ball_vz])
+
+                            v_ball_hit = v_ball_now + np.array([0.0,0.0, self.g]) * t_hit   # predicted ball velocity right before impact
+                            self.v_ball_at_hit = v_ball_hit
+                            v_ball_n  = np.dot(v_ball_hit, n)
+                            v_launch = np.dot(v_launch, n)
+                            v_pad = ((self.m_ball * v_launch + self.m_paddle * v_launch) - (self.m_ball * v_ball_n))/self.m_paddle
+                            self.v_paddle = v_pad * n
 
                             self.goal_R = self.R_from_normal(n)
 
@@ -576,21 +542,23 @@ class CombinedNode(Node):
                             # print("v_launch:", v_launch)
                             # print("speed:", np.linalg.  norm(v_launch))
                             # print("================================\n")
-
+                            # self.get_logger().info(
+                            #     f"[PLAN] goal_p={self.goal_p}, goal_pos={self.goal_pos}, "
+                            #     f"v_launch={v_launch}, |v_launch|={np.linalg.norm(v_launch):.3f}, "
+                            #     f"ball_v_at_plan={self.ball_vel}, "
+                            #     f"v_paddle_des={self.v_paddle}, |v_paddle_des|={np.linalg.norm(self.v_paddle):.3f}"
+                            # )
                             # ----- PASSING OVER THE NEW BALL LAUNCH VELOCITY -----
                             speed = np.linalg.norm(v_launch)
-                            self.get_logger().info(
-                                f"Launch vel command: {v_launch}, speed={speed:.3f}"
-                            )
+                            # self.get_logger().info(
+                            #     f"Launch vel command: {v_launch}, speed={speed:.3f}"
+                            # )
                             # ----------------------
                         self.have_plan = True
                         self.just_respawned = False
-                        self.get_logger().info(
-                            f"Planned intercept: T={self.T:.3f}s, goal_p={self.goal_p}"
-                        )
-        # COMPUTE THE TRAJECTORY AT THIS TIME INSTANCE.
-
-        
+                        # self.get_logger().info(
+                        #     f"Planned intercept: T={self.T:.3f}s, goal_p={self.goal_p}"
+                        # )
 
         # # === q0 to goal via joint spline 
 
@@ -745,11 +713,12 @@ class CombinedNode(Node):
                 -half_size[1] <= rel_pos_local[1] <= half_size[1]
             )
 
-            touching_z = (rel_pos_local[2] - self.radius) <= half_size[2]
+
+            touching_z = abs(rel_pos_local[2]) <= (half_size[2] + self.radius)
 
             if in_xy and touching_z and not self.ball_launched:
                
-                n = R[:, 2]
+                n = self.n_plan if self.n_plan is not None else R[:,2]
                 if n[2] < 0:   # if pointing downward
                     n = -n 
                 n = n / np.linalg.norm(n)
@@ -757,6 +726,10 @@ class CombinedNode(Node):
                 # Ball velocity vector
                 # --- Paddle linear velocity in world frame ---
                 paddle_v = vd   # already computed by fkin/Jv above
+                # self.get_logger().info(
+                #     "[PADDLE VEL] paddle_v = (%.3f, %.3f, %.3f), |v| = %.3f"
+                #     % (paddle_v[0], paddle_v[1], paddle_v[2], np.linalg.norm(paddle_v))
+                # )
 
                 # --- Ball velocity vector ---
                 v_ball = np.array([self.ball_vx, self.ball_vy, self.ball_vz])
@@ -764,58 +737,85 @@ class CombinedNode(Node):
                 # --- Relative velocity (ball w.r.t moving paddle) ---
                 v_rel = v_ball - paddle_v
                 v_rel_n_scalar = np.dot(v_rel, n)
-                self.get_logger().info(
-                    "[CONTACT PRE] paddle_p="
-                    f"{paddle_pos}, n={n}, "
-                    f"paddle_v={paddle_v}, |paddle_v|={np.linalg.norm(paddle_v):.3f}, "
-                    f"ball_v={v_ball}, |ball_v|={np.linalg.norm(v_ball):.3f}, "
-                    f"v_rel={v_rel}, v_rel_n_scalar={v_rel_n_scalar:.3f}"
-                )
-                if v_rel_n_scalar < 0.0:
+                # self.get_logger().info(
+                #     "[CONTACT PRE] paddle_p="
+                #     f"{paddle_pos}, n={n}, "
+                #     f"paddle_v={paddle_v}, |paddle_v|={np.linalg.norm(paddle_v):.3f}, "
+                #     f"ball_v={v_ball}, |ball_v|={np.linalg.norm(v_ball):.3f}, "
+                #     f"v_rel={v_rel}, v_rel_n_scalar={v_rel_n_scalar:.3f}"
+                # ) 
+                
 
-                    # v_out = v_in - (1+e) (v_rel · n) n
-                    # v_after = v_ball - (1.0 + self.restitution) * v_rel_n_scalar * n
 
-                    # --- Split into normal and tangential components ---
-                    v_rel_n = np.dot(v_rel, n) * n
-                    v_rel_t = v_rel - v_rel_n
+                # if v_rel_n_scalar < 0.0:
 
-                    # --- Bounce (reflect normal component with restitution) ---
-                    v_rel_n_after = -self.paddle_restitution * v_rel_n
+                #     # v_out = v_in - (1+e) (v_rel · n) n
+                #     # v_after = v_ball - (1.0 + self.restitution) * v_rel_n_scalar * n
 
-                    # --- New relative velocity ---
-                    v_rel_after = v_rel_t + v_rel_n_after
+                #     # --- Split into normal and tangential components ---
+                #     v_rel_n = np.dot(v_rel, n) * n
+                #     v_rel_t = v_rel - v_rel_n
 
-                    # --- Convert back to world frame ---
-                    v_after = v_rel_after + paddle_v
+                #     # --- Bounce (reflect normal component with restitution) ---
+                #     v_rel_n_after = -self.paddle_restitution * v_rel_n
 
-                    # --- Update ball velocity ---
-                    # v_after = (np.linalg.norm(v_ball)) * n
-                    self.ball_vx = float(self.v_launch[0])
-                    self.ball_vy = float(self.v_launch[1])
-                    self.ball_vz = float(self.v_launch[2])
-                    self.get_logger().info(
-                        "[CONTACT POST] v_rel_n="
-                        f"{v_rel_n}, v_rel_t={v_rel_t}, "
-                        f"v_rel_after={v_rel_after}, "
-                        f"v_after={v_after}, |v_after|={np.linalg.norm(v_after):.3f}"
-                    )
+                #     # --- New relative velocity ---
+                #     v_rel_after = v_rel_t + v_rel_n_after
+
+                #     # --- Convert back to world frame ---
+                #     v_after = v_rel_after + paddle_v
+
+                #     # --- Update ball velocity ---
+                #     # v_after = (np.linalg.norm(v_ball)) * n
+                #     self.ball_vx = float(self.v_launch[0])
+                #     self.ball_vy = float(self.v_launch[1])
+                #     self.ball_vz = float(self.v_launch[2])
+                #     self.get_logger().info(
+                #         "[CONTACT POST] v_rel_n="
+                #         f"{v_rel_n}, v_rel_t={v_rel_t}, "
+                #         f"v_rel_after={v_rel_after}, "
+                #         f"v_after={v_after}, |v_after|={np.linalg.norm(v_after):.3f}"
+                #     )
 
 
                 # self.get_logger().info(
                 #     f"CONTACT PHYSICS (with paddle motion): v = ({self.ball_vx:.2f}, {self.ball_vy:.2f}, {self.ball_vz:.2f})"
                 # )
+                if v_rel_n_scalar < 0.0:
+                    # Decompose ball and bat velocities along the contact normal
+                    
+                    v_ball_n = np.dot(v_ball, n)      # scalar
+                    v_paddle_n  = np.dot(paddle_v, n)    # scalar
+                    v_ball_t = v_ball - v_ball_n * n  # tangential part
 
+                    # 1D elastic collision along normal
+                    m_ball = self.m_ball
+                    m_paddle  = self.m_paddle
+                    v_ball_n_after = (
+                        (m_ball* v_ball_n) + (m_paddle * v_paddle_n)
+                    ) / (m_ball + m_paddle)
+
+                    # Recombine: tangential unchanged, normal updated
+                    v_after = v_ball_t + v_ball_n_after * n
+
+                    # Update ball velocity (THIS replaces using self.v_launch)
+                    self.ball_vx = float(v_after[0])
+                    self.ball_vy = float(v_after[1])
+                    self.ball_vz = float(v_after[2])
+                    
+                    self.get_logger().info(
+                        f"actual velocity={v_after}, desired_vel{self.v_launch}, diff={(self.v_launch-v_after)}" 
+                    )
                     self.ball_launched = True
                 else:
                     pass
 
                 # Respawn if bounce becomes too small
                 if abs(self.ball_vz) < self.min_bounce and np.linalg.norm(v_after) < 0.2:
-                    self.get_logger().info("Bounce too small -> respawn")
-                    self.get_logger().error(
-                        f"[RESPAWN] PADDLE WEAK BOUNCE | vz={self.ball_vz:.3f} | speed={np.linalg.norm(v_after):.3f}"
-                    )
+                    # self.get_logger().info("Bounce too small -> respawn")
+                    # self.get_logger().error(
+                    #     f"[RESPAWN] PADDLE WEAK BOUNCE | vz={self.ball_vz:.3f} | speed={np.linalg.norm(v_after):.3f}"
+                    # )
                     self.respawn_callback(Bool(data=True))
 
 
@@ -824,9 +824,9 @@ class CombinedNode(Node):
             self.ball_z = self.floor + self.radius
             self.ball_vz = -self.ball_vz * self.floor_restitution
             if abs(self.ball_vz) < self.min_bounce:
-                self.get_logger().error(
-                    f"[RESPAWN] FLOOR WEAK BOUNCE | ball_z={self.ball_z:.3f} | vz={self.ball_vz:.3f}"
-                )
+                # self.get_logger().error(
+                #     f"[RESPAWN] FLOOR WEAK BOUNCE | ball_z={self.ball_z:.3f} | vz={self.ball_vz:.3f}"
+                # )
                 self.respawn_callback(Bool(data=True))
 
         # Ball marker 
