@@ -441,6 +441,8 @@ class CombinedNode(Node):
         #     if self.have_plan:
         #         self.get_logger().info("Ball respawned, clearing old plan.")
         #     self.have_plan = False
+
+        # ----- Ideally this runs right after the ball is spawned
         if (not self.have_plan) and (not self.ball_launched) and self.arm_is_ready():
             z0  = self.ball_z
             vz0 = self.ball_vz
@@ -506,7 +508,7 @@ class CombinedNode(Node):
                             v_out = v_launch
                             self.v_launch = v_launch
 
-                            n_phys = v_out 
+                            n_phys = v_out - v_in 
                             n_phys = n_phys / np.linalg.norm(n_phys)
 
                             # paddle pose
@@ -526,12 +528,18 @@ class CombinedNode(Node):
                             v_ball_now = np.array([self.ball_vx, self.ball_vy, self.ball_vz])
 
                             v_ball_hit = v_ball_now + np.array([0.0,0.0, self.g]) * t_hit   # predicted ball velocity right before impact
-                            self.v_ball_at_hit = v_ball_hit
+                            self.v_ball_at_hit = v_ball_hit 
                             v_ball_n  = np.dot(v_ball_hit, n)
-                            v_launch = np.dot(v_launch, n)
+                            v_launch_n = np.dot(v_launch, n)
                             # v_paddle = ( (self.m_ball + self.m_paddle) / (2 * self.m_paddle) ) * (v_launch - ( (self.m_ball - self.m_paddle) / self.m_ball ) * v_ball_n)
+                            mb = self.m_ball
+                            mp = self.m_paddle
+                            # v_pad =   (self.m_ball * v_launch + self.m_paddle * v_launch) - (self.m_ball * v_ball_n))/self.m_paddle
+                            # -------OPTION 1 ------
+                            v_pad = ((mb + mp) * v_launch_n - (mb - mp) * v_ball_n) / (2*mp)
 
-                            v_pad = ((self.m_ball * v_launch + self.m_paddle * v_launch) - (self.m_ball * v_ball_n))/self.m_paddle
+                            # ------ OPTION 2--------
+                            # v_pad = v_launch + v_ball_n 
                             self.v_paddle = v_pad * n
 
                             self.goal_R = self.R_from_normal(n)
@@ -793,21 +801,27 @@ class CombinedNode(Node):
                 # )
                 if v_rel_n_scalar < 0.0:
                     # Decompose ball and bat velocities along the contact normal
-                    
+                    v_ball = self.v_ball_at_hit
                     v_ball_n = np.dot(v_ball, n)      # scalar
                     v_paddle_n  = np.dot(paddle_v, n)    # scalar
                     v_ball_t = v_ball - v_ball_n * n  # tangential part
 
                     # 1D elastic collision along normal
-                    m_ball = self.m_ball
-                    m_paddle  = self.m_paddle
-                    v_ball_n_after = (
-                        (m_ball* v_ball_n) + (m_paddle * v_paddle_n)
-                    ) / (m_ball + m_paddle)
+                    mb = self.m_ball
+                    mp  = self.m_paddle
+
+                    # ------ OPTION 1 -------
+                    v_ball_after_n = ((mb-mp)*v_ball_n + (2)*mp*v_paddle_n)/(mb+mp)
+
+                    # ------ OPTION 2 ------
+                    # v_ball_after_n = v_paddle_n + -1 * v_ball_n
+                    # v_ball_n_after = (
+                    #     (m_ball* v_ball_n) + (m_paddle * v_paddle_n)
+                    # ) / (m_ball + m_paddle)
                     # v_ball_after_n = ((m_ball - m_paddle) / (m_ball + m_paddle)) * v_rel_n_scalar + (2 * m_paddle / (m_ball + m_paddle)) * np.dot(paddle_v, n)
 
                     # Recombine: tangential unchanged, normal updated
-                    v_after = v_ball_t + v_ball_n_after * n
+                    v_after = v_ball_t + v_ball_after_n * n
 
                     # Update ball velocity (THIS replaces using self.v_launch)
                     self.ball_vx = float(self.v_launch[0])
